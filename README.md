@@ -103,7 +103,7 @@ Exit codes: **0** success, **1** runtime/control failure, **2** invalid argument
 
 ## Configuration
 
-`tokens.toml` is required. Direct regular `tokens.d/*.toml` fragments are appended in filename-byte order. Fragments may only contain collectors. No overrides, includes, symlinks or repository-local configuration discovery. Maximum: 64 files / 1 MiB total.
+`tokens.toml` is required and may be a symlink to a regular file, which is resolved before reading. Direct regular `tokens.d/*.toml` fragments are appended in filename-byte order; fragments may only contain collectors and may not be symlinks. There are no overrides, includes or repository-local configuration discovery. Maximum: 64 files / 1 MiB total.
 
 ```toml
 schema_version = 1

@@ -175,6 +175,20 @@ fn no_symlink(path: &Path, directory: bool) -> Result<()> {
     );
     Ok(())
 }
+// The main config may be managed by a dotfiles tool as a symlink. Resolve it
+// before opening so the regular-file and O_NOFOLLOW checks still apply to the
+// actual target. Fragments remain regular files so a multi-file configuration
+// cannot silently pull in arbitrary external files.
+fn config_file_path(path: &Path, allow_symlink: bool) -> Result<PathBuf> {
+    if allow_symlink {
+        let resolved = fs::canonicalize(path).context("configuration entry unavailable")?;
+        no_symlink(&resolved, false)?;
+        Ok(resolved)
+    } else {
+        no_symlink(path, false)?;
+        Ok(path.to_owned())
+    }
+}
 impl Snapshot {
     pub fn read(dir: &Path) -> Result<Self> {
         for p in dir.ancestors() {
@@ -205,13 +219,13 @@ impl Snapshot {
         ensure!(names.len() <= 64, "configuration exceeds 64 files");
         let mut total = 0;
         let mut files = Vec::new();
-        for name in names {
-            no_symlink(&name, false)?;
+        for (index, name) in names.into_iter().enumerate() {
+            let read_path = config_file_path(&name, index == 0)?;
             let mut bytes = Vec::new();
             fs::OpenOptions::new()
                 .read(true)
                 .custom_flags(nix::libc::O_NOFOLLOW)
-                .open(&name)?
+                .open(read_path)?
                 .take((1_048_577 - total) as u64)
                 .read_to_end(&mut bytes)?;
             total += bytes.len();

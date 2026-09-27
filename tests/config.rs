@@ -105,6 +105,17 @@ fn strict_validation_matrix() {
     );
 }
 #[test]
+fn main_config_symlink_is_supported() {
+    let (_t, p) = directory();
+    let source = tempfile::tempdir().unwrap();
+    let target = source.path().join("tokens.toml");
+    fs::write(&target, "schema_version=1\n").unwrap();
+    std::os::unix::fs::symlink(&target, p.join("tokens.toml")).unwrap();
+
+    assert!(Config::load(&p).is_ok());
+}
+
+#[test]
 fn files_limits_symlinks_and_fragment_globals() {
     let (_t, p) = directory();
     fs::write(p.join("tokens.toml"), "schema_version=1").unwrap();
