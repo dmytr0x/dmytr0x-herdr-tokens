@@ -1,0 +1,133 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    name: Validate release tag
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.x"
+      - name: Match tag and manifest versions
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          python3 - <<'PY'
+          import os
+          import pathlib
+          import tomllib
+
+          tag = os.environ["RELEASE_TAG"]
+          cargo = tomllib.loads(pathlib.Path("Cargo.toml").read_text())
+          plugin = tomllib.loads(pathlib.Path("herdr-plugin.toml").read_text())
+          cargo_version = cargo["package"]["version"]
+          plugin_version = plugin["version"]
+          expected_tag = f"v{cargo_version}"
+
+          if plugin_version != cargo_version:
+              raise SystemExit(
+                  f"version mismatch: Cargo.toml={cargo_version}, "
+                  f"herdr-plugin.toml={plugin_version}"
+              )
+          if tag != expected_tag:
+              raise SystemExit(f"release tag must be {expected_tag}, got {tag}")
+          PY
+
+  quality:
+    name: Test release source
+    needs: validate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.94.0
+        with:
+          components: rustfmt, clippy
+      - run: cargo fmt --check
+      - run: cargo clippy --locked --all-targets -- -D warnings
+      - run: cargo test --locked
+
+  build:
+    name: Build ${{ matrix.target }}
+    needs: quality
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-musl
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+          - os: macos-14
+            target: aarch64-apple-darwin
+          - os: macos-14
+            target: x86_64-apple-darwin
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@1.94.0
+        with:
+          targets: ${{ matrix.target }}
+      - name: Install Linux linker
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install --yes musl-tools
+      - name: Build release binary
+        run: cargo build --release --locked --target "${{ matrix.target }}"
+      - name: Package release binary
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          version="${RELEASE_TAG#v}"
+          archive="herdr-tokens-${version}-${TARGET}.tar.gz"
+          mkdir staging
+          cp "target/${TARGET}/release/herdr-tokens" staging/herdr-tokens
+          chmod 755 staging/herdr-tokens
+          COPYFILE_DISABLE=1 tar -C staging -czf "$archive" herdr-tokens
+      - uses: actions/upload-artifact@v7
+        with:
+          name: herdr-tokens-${{ matrix.target }}
+          path: herdr-tokens-*.tar.gz
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: Publish GitHub Release assets
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Generate checksums and publish assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+          GH_REPO: ${{ github.repository }}
+        working-directory: dist
+        run: |
+          sha256sum herdr-tokens-*.tar.gz > SHA256SUMS
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" ./*.tar.gz SHA256SUMS --clobber
+          else
+            gh release create "$RELEASE_TAG" \
+              --verify-tag \
+              --title "$RELEASE_TAG" \
+              --generate-notes \
+              ./*.tar.gz SHA256SUMS
+          fi

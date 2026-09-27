@@ -41,3 +41,14 @@ See [compatibility and qualification](docs/compatibility.md) for acceptance comm
 - Initialize Git, inspect the complete staged file list, and create the remote only after reviewing the files to be published.
 - Enable GitHub private vulnerability reporting and branch protection requiring the CI checks.
 - Run the Linux/macOS CI matrix before tagging a release; keep unresolved qualification limits visible.
+
+## Releases
+
+Keep the versions in `Cargo.toml` and `herdr-plugin.toml` identical. After the commit passes CI, create and push the matching tag:
+
+```sh
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+The release workflow rejects a tag that is not exactly `v<manifest-version>`. It builds archives for macOS and Linux on x86-64 and ARM64, generates `SHA256SUMS`, and creates the GitHub Release. Re-running the workflow replaces assets on an existing release. Do not move a published version tag to different source; publish a new version instead.

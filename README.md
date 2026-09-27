@@ -16,6 +16,10 @@ test -e "$CONFIG_DIR/tokens.toml" || cp examples/tokens.toml "$CONFIG_DIR/tokens
 herdr plugin action invoke herdr-tokens.start
 ```
 
+### Release binaries
+
+Tagged releases publish prebuilt `herdr-tokens` archives for Apple Silicon and Intel macOS, and static musl binaries for x86-64 and ARM64 Linux. Every release also includes `SHA256SUMS`. These assets prepare the plugin for binary installation, but the current manifest does not download them yet: installation from a checkout still runs Cargo as shown above.
+
 Add rows to **Herdr's own** configuration, not `tokens.toml`:
 
 ```toml
@@ -249,4 +253,4 @@ python3 tests/real_herdr.py --capture   # optional; isolated server/config/home/
 python3 tests/soak.py --seconds 600 --output /tmp/herdr-tokens-soak.json
 ```
 
-Python 3 is a **test-only** prerequisite for the fake CLI/lifecycle and acceptance harnesses. Tests never target your active session. CI runs formatting, Clippy and tests on Linux and macOS. See [compatibility and release qualification](docs/compatibility.md) for observed results and remaining gates. Prebuilt distribution, Windows, SSH collection, HTTP/file providers, watchers and dynamic provider registries are deferred. Run a separate emitter on a remote host against that host's local endpoint.
+Python 3 is a **test-only** prerequisite for the fake CLI/lifecycle and acceptance harnesses. Tests never target your active session. CI runs formatting, Clippy and tests on Linux and macOS. See [compatibility and release qualification](docs/compatibility.md) for observed results and remaining gates. Automatic consumption of release binaries during plugin installation, Windows, SSH collection, HTTP/file providers, watchers and dynamic provider registries are deferred. Run a separate emitter on a remote host against that host's local endpoint.
