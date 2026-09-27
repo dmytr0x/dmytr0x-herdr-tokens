@@ -1,0 +1,18 @@
+# Merge into HERDR's config.toml, not the plugin's tokens.toml.
+# Herdr 0.9.1: token fg uses #RGB or #RRGGBB (not palette names).
+[ui.sidebar.spaces]
+rows = [
+  ["workspace", "branch", "git_status"],
+  [
+    { token = "$git_modified", fg = "#f9e2af" },
+    { token = "$git_staged", fg = "#a6e3a1" },
+    { token = "$git_untracked", fg = "#89b4fa" },
+    { token = "$git_conflicts", fg = "#f38ba8" },
+  ],
+]
+
+# Optional shared sidebar/active-row background; NOT a per-token background.
+# Merge these keys into your existing theme.custom table if desired.
+# [theme.custom]
+# sidebar_bg = "#1e1e2e"
+# active_row_bg = "#1e1e2e"

@@ -1,0 +1,54 @@
+schema_version = 1
+
+[runtime]
+max_concurrency = 4
+discovery_interval_ms = 5000
+
+# Optional session-specific overrides; normally omitted.
+# [workspace_dirs]
+# w1 = "/absolute/path/to/project"
+
+[[collectors]]
+name = "git"
+provider = "git"
+interval_ms = 2000
+timeout_ms = 1000
+ttl_ms = 6000
+
+# Prefix/suffix are literal text; the shorthand git_modified = "modified_files"
+# still works. Colors belong in Herdr's config: see examples/herdr-sidebar.toml.
+[collectors.tokens]
+git_modified = { field = "modified_files", prefix = "!" }
+git_staged = { field = "staged_files", prefix = "✓" }
+git_untracked = { field = "untracked_files", prefix = "?" }
+git_conflicts = { field = "conflict_files", prefix = "✖" }
+# Example with both: { field = "modified_files", prefix = "[!", suffix = "]" }
+
+# Plain command stdout can map directly to one or more tokens through the
+# reserved "stdout" selector. ANSI escapes are stripped.
+# [[collectors]]
+# name = "date"
+# provider = "command"
+# global = true
+# command = ["date", "+%Y-%m-%d %H:%M:%S"]
+# output = "text"
+# interval_ms = 10000
+# timeout_ms = 2000
+# ttl_ms = 30000
+# [collectors.tokens]
+# current_date = "stdout"
+
+# Only enable repository-controlled scripts in repositories you trust.
+# [[collectors]]
+# name = "ci"
+# provider = "command"
+# command = ["./scripts/ci-status"]
+# interval_ms = 10000
+# timeout_ms = 2000
+# ttl_ms = 30000
+# env_allow = ["CI_TOKEN"]
+# [collectors.env]
+# CI_FORMAT = "json"
+# [collectors.tokens]
+# ci_status = "status"
+# ci_url = "url"

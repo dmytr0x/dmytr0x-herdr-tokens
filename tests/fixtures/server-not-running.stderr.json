@@ -1,0 +1,1 @@
+{"id":"cli:workspace:list","error":{"code":"server_not_running","message":"no herdr server is running at /fixture/missing.sock; run `herdr` to start or attach it"}}

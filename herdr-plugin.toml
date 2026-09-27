@@ -1,0 +1,38 @@
+id = "herdr-tokens"
+name = "Tokens Emitter"
+version = "0.1.0"
+min_herdr_version = "0.9.1"
+description = "Publish dynamic workspace sidebar tokens"
+platforms = ["linux", "macos"]
+
+[[build]]
+command = ["cargo", "build", "--release", "--locked"]
+
+[[startup]]
+command = ["./target/release/herdr-tokens", "start"]
+
+[[actions]]
+id = "start"
+title = "Start tokens emitter"
+command = ["./target/release/herdr-tokens", "start"]
+
+[[actions]]
+id = "stop"
+title = "Stop tokens emitter"
+command = ["./target/release/herdr-tokens", "stop"]
+
+[[actions]]
+id = "refresh"
+title = "Refresh workspace tokens"
+contexts = ["workspace"]
+command = ["./target/release/herdr-tokens", "refresh"]
+
+[[actions]]
+id = "reload"
+title = "Reload token configuration"
+command = ["./target/release/herdr-tokens", "reload"]
+
+[[actions]]
+id = "status"
+title = "Inspect tokens emitter"
+command = ["./target/release/herdr-tokens", "status"]

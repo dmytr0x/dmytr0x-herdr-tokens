@@ -1,0 +1,147 @@
+use crate::providers::Patch;
+use anyhow::Result;
+use serde_json::{Value, json};
+use std::{
+    fs::{self, File, OpenOptions},
+    io::{self, Write},
+    os::unix::fs::OpenOptionsExt,
+    path::PathBuf,
+    sync::{Arc, Mutex},
+    time::{SystemTime, UNIX_EPOCH},
+};
+use tokio::time::Instant;
+
+#[derive(Default, Clone)]
+pub struct JobStatus {
+    pub attempted: Option<Instant>,
+    pub collected: Option<Instant>,
+    pub acknowledged: Option<Instant>,
+    pub duration_ms: Option<u64>,
+    pub failures: u64,
+    pub error: Option<String>,
+    pub publication_error: Option<String>,
+    pub last_collected: Option<Patch>,
+    pub last_acknowledged: Option<Patch>,
+    pub acknowledged_completion: Option<Instant>,
+    pub missed_deadlines: u64,
+    pub truncated: bool,
+}
+fn age(time: Option<Instant>) -> Option<u64> {
+    time.map(|t| Instant::now().saturating_duration_since(t).as_millis() as u64)
+}
+impl JobStatus {
+    pub fn json(&self, include_values: bool, ttl_ms: u64) -> Value {
+        let mut v = json!({
+            "last_attempt_age_ms": age(self.attempted), "last_collection_age_ms": age(self.collected),
+            "last_acknowledgement_age_ms": age(self.acknowledged), "duration_ms": self.duration_ms,
+            "consecutive_failures": self.failures, "collection_error": self.error, "publication_error": self.publication_error,
+            "estimated_expiry_in_ms": age(self.acknowledged_completion).map(|a| ttl_ms.saturating_sub(a)),
+            "missed_deadlines": self.missed_deadlines, "output_truncated": self.truncated,
+        });
+        if include_values {
+            v["last_collected"] = json!(self.last_collected);
+            v["last_acknowledged"] = json!(self.last_acknowledged);
+        }
+        v
+    }
+}
+struct Log {
+    dir: PathBuf,
+    day: u64,
+    file: Option<File>,
+    bytes: u64,
+    suppressed: bool,
+}
+#[derive(Clone)]
+struct Writer(Arc<Mutex<Log>>);
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Writer {
+    type Writer = Self;
+    fn make_writer(&'a self) -> Self {
+        self.clone()
+    }
+}
+impl Write for Writer {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        let mut log = self.0.lock().map_err(|_| io::Error::other("log lock"))?;
+        let day = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs()
+            / 86400;
+        if log.file.is_none() || day != log.day {
+            let file = OpenOptions::new()
+                .append(true)
+                .create(true)
+                .mode(0o600)
+                .custom_flags(nix::libc::O_NOFOLLOW)
+                .open(log.dir.join(format!("day-{day:08}.jsonl")))?;
+            log.bytes = file.metadata()?.len();
+            log.file = Some(file);
+            log.day = day;
+            log.suppressed = log.bytes >= 10 * 1_048_576;
+            let mut files: Vec<_> = fs::read_dir(&log.dir)?
+                .filter_map(Result::ok)
+                .map(|e| e.path())
+                .filter(|p| {
+                    p.file_name().is_some_and(|n| {
+                        n.to_string_lossy().starts_with("day-")
+                            && n.to_string_lossy().ends_with(".jsonl")
+                    })
+                })
+                .collect();
+            files.sort();
+            let excess = files.len().saturating_sub(7);
+            for p in files.into_iter().take(excess) {
+                fs::remove_file(p)?;
+            }
+        }
+        if log.bytes + buf.len() as u64 > 10 * 1_048_576 - 128 {
+            if !log.suppressed {
+                log.file.as_mut().expect("open log").write_all(
+                    b"{\"event\":\"daily log cap reached; further events suppressed\"}\n",
+                )?;
+                log.suppressed = true;
+            }
+        } else if !log.suppressed {
+            log.file.as_mut().expect("open log").write_all(buf)?;
+            log.bytes += buf.len() as u64;
+        }
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        if let Some(f) = &mut self
+            .0
+            .lock()
+            .map_err(|_| io::Error::other("log lock"))?
+            .file
+        {
+            f.flush()?;
+        }
+        Ok(())
+    }
+}
+pub fn init(log_dir: Option<PathBuf>) -> Result<()> {
+    if let Some(dir) = log_dir {
+        crate::runtime::private_dir(&dir)?;
+        let writer = Writer(Arc::new(Mutex::new(Log {
+            dir,
+            day: 0,
+            file: None,
+            bytes: 0,
+            suppressed: false,
+        })));
+        tracing_subscriber::fmt()
+            .json()
+            .with_ansi(false)
+            .with_writer(writer)
+            .try_init()
+            .map_err(|_| anyhow::anyhow!("logging initialization failed"))?;
+    } else {
+        tracing_subscriber::fmt()
+            .with_ansi(false)
+            .with_writer(std::io::stderr)
+            .try_init()
+            .map_err(|_| anyhow::anyhow!("logging initialization failed"))?;
+    }
+    Ok(())
+}

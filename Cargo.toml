@@ -1,0 +1,29 @@
+[package]
+name = "herdr-tokens"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.94"
+license = "MIT"
+description = "Display-only workspace metadata collectors for Herdr"
+readme = "README.md"
+keywords = ["herdr", "metadata", "git", "cli"]
+categories = ["command-line-utilities"]
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive", "env"] }
+fs2 = "0.4"
+nix = { version = "0.30", features = ["signal", "process", "user", "fs"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+tempfile = "3"
+thiserror = "2"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "time", "signal", "sync", "net", "io-util"] }
+tokio-util = "0.7"
+toml = "0.8"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["fmt", "json"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["test-util"] }

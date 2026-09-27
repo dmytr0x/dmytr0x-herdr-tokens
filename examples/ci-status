@@ -1,0 +1,3 @@
+#!/bin/sh
+# Demonstration only: replace with your trusted project's real status query.
+printf '%s\n' '{"status":"example only","url":"https://ci.example.com/build/123"}'
