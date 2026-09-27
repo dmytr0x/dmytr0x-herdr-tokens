@@ -2,9 +2,29 @@
 
 One Rust executable that collects **display-only** workspace metadata and reports it to Herdr. Herdr owns sidebar rendering, storage and TTL expiry. macOS and Linux; Herdr **0.9.1** is the verified contract. Later versions require contract testing.
 
-## Install and start
+## Install from GitHub
 
-Prerequisites: Cargo/rustup (the checkout pins Rust 1.94.0), Herdr ≥0.9.1 and Git ≥2.20 when using the Git provider. Local linking does **not** build the plugin.
+Prerequisites: Herdr ≥0.9.1, Git, `curl`, and `tar`. Cargo is **not** required.
+
+1. Let Herdr install the plugin. Review its preview, then confirm:
+
+   ```sh
+   herdr plugin install dmytr0x/dmytr0x-herdr-tokens
+   ```
+
+   The installer automatically downloads the prebuilt binary for your platform and verifies its SHA-256 checksum.
+
+2. Start the plugin:
+
+   ```sh
+   herdr plugin action invoke dmytr0x-herdr-tokens.start
+   ```
+
+   On first start, the plugin creates `tokens.toml` from the included example without overwriting an existing configuration.
+
+## Build from source
+
+Prerequisites: Cargo/rustup (the checkout pins Rust 1.94.0), Herdr ≥0.9.1 and Git ≥2.20. From a repository checkout, run:
 
 ```sh
 cargo build --release --locked
@@ -16,9 +36,7 @@ test -e "$CONFIG_DIR/tokens.toml" || cp examples/tokens.toml "$CONFIG_DIR/tokens
 herdr plugin action invoke dmytr0x-herdr-tokens.start
 ```
 
-### Release binaries
-
-Tagged releases publish prebuilt `herdr-tokens` archives for Apple Silicon and Intel macOS, and static musl binaries for x86-64 and ARM64 Linux. Every release also includes `SHA256SUMS`. These assets prepare the plugin for binary installation, but the current manifest does not download them yet: installation from a checkout still runs Cargo as shown above.
+## Configure the sidebar
 
 Add rows to **Herdr's own** configuration, not `tokens.toml`:
 
@@ -35,7 +53,7 @@ rows = [
 ]
 ```
 
-Use `herdr server reload-config` to apply sidebar edits. Linking, enabling and reloading Herdr do **not** launch plugin startup hooks. Start manually as shown above. Hooks run after a server starts; they are not supervisors.
+Use `herdr server reload-config` to apply sidebar edits. Installing, linking, enabling and reloading Herdr do **not** launch plugin startup hooks. Start manually as shown above. Hooks run after a server starts; they are not supervisors.
 
 ```sh
 herdr plugin action invoke dmytr0x-herdr-tokens.status
@@ -46,7 +64,7 @@ herdr plugin action invoke dmytr0x-herdr-tokens.stop
 
 Herdr action invocation is asynchronous: inspect its command log (`herdr plugin log list`) for output, or use the executable's `status` command directly.
 
-**Stop before disable, uninstall or update.** Disable/uninstall does not kill an independently detached runner. To update: stop, wait until `status` reports no runner, update/build with `--locked`, then start. Do not replace a running binary and assume its process changed. A detached runner waits through server outages until stopped.
+**Stop before disable, uninstall or update.** Disable/uninstall does not kill an independently detached runner. To update a GitHub installation: stop, wait until `status` reports no runner, run `herdr plugin install dmytr0x/dmytr0x-herdr-tokens` again, then start it. Source installations should update, rebuild with `--locked`, and restart. Do not replace a running binary and assume its process changed. A detached runner waits through server outages until stopped.
 
 ## CLI and locations
 
