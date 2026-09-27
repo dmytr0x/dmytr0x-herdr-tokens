@@ -1,5 +1,5 @@
 [package]
-name = "herdr-tokens"
+name = "dmytr0x-herdr-tokens"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.94"
@@ -8,6 +8,13 @@ description = "Display-only workspace metadata collectors for Herdr"
 readme = "README.md"
 keywords = ["herdr", "metadata", "git", "cli"]
 categories = ["command-line-utilities"]
+
+[lib]
+name = "herdr_tokens"
+
+[[bin]]
+name = "herdr-tokens"
+path = "src/main.rs"
 
 [dependencies]
 anyhow = "1"

@@ -9,11 +9,11 @@ Prerequisites: Cargo/rustup (the checkout pins Rust 1.94.0), Herdr ≥0.9.1 and 
 ```sh
 cargo build --release --locked
 herdr plugin link "$PWD"
-CONFIG_DIR="$(herdr plugin config-dir herdr-tokens)"
+CONFIG_DIR="$(herdr plugin config-dir dmytr0x-herdr-tokens)"
 # Do not overwrite an existing configuration:
 test -e "$CONFIG_DIR/tokens.toml" || cp examples/tokens.toml "$CONFIG_DIR/tokens.toml"
 ./target/release/herdr-tokens validate --config-dir "$CONFIG_DIR"
-herdr plugin action invoke herdr-tokens.start
+herdr plugin action invoke dmytr0x-herdr-tokens.start
 ```
 
 ### Release binaries
@@ -38,10 +38,10 @@ rows = [
 Use `herdr server reload-config` to apply sidebar edits. Linking, enabling and reloading Herdr do **not** launch plugin startup hooks. Start manually as shown above. Hooks run after a server starts; they are not supervisors.
 
 ```sh
-herdr plugin action invoke herdr-tokens.status
-herdr plugin action invoke herdr-tokens.refresh
-herdr plugin action invoke herdr-tokens.reload
-herdr plugin action invoke herdr-tokens.stop
+herdr plugin action invoke dmytr0x-herdr-tokens.status
+herdr plugin action invoke dmytr0x-herdr-tokens.refresh
+herdr plugin action invoke dmytr0x-herdr-tokens.reload
+herdr plugin action invoke dmytr0x-herdr-tokens.stop
 ```
 
 Herdr action invocation is asynchronous: inspect its command log (`herdr plugin log list`) for output, or use the executable's `status` command directly.

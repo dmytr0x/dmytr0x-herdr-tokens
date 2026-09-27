@@ -8,6 +8,8 @@ pub mod publisher;
 pub mod runner;
 pub mod runtime;
 
+const PLUGIN_ID: &str = "dmytr0x-herdr-tokens";
+
 use anyhow::{Context, Result, ensure};
 use clap::{Parser, Subcommand};
 use std::{path::PathBuf, process::Stdio, time::Duration};
@@ -171,9 +173,9 @@ pub async fn execute(cli: Cli) -> Result<()> {
         Command::Stop => ("stop", None, false, false),
         Command::Reload => ("reload", None, false, false),
         Command::Refresh { workspace } => {
-            let action = std::env::var("HERDR_PLUGIN_ID").as_deref() == Ok("herdr-tokens")
+            let action = std::env::var("HERDR_PLUGIN_ID").as_deref() == Ok(PLUGIN_ID)
                 && std::env::var("HERDR_PLUGIN_ACTION_ID")
-                    .is_ok_and(|v| v == "refresh" || v == "herdr-tokens.refresh");
+                    .is_ok_and(|v| v == "refresh" || v == format!("{PLUGIN_ID}.refresh"));
             let workspace = workspace.or_else(|| {
                 action
                     .then(|| std::env::var("HERDR_WORKSPACE_ID").ok())

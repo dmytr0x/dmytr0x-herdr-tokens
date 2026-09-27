@@ -167,7 +167,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "herdr-tokens"
+name = "dmytr0x-herdr-tokens"
 version = "0.1.0"
 dependencies = [
  "anyhow",

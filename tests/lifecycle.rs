@@ -415,7 +415,7 @@ fn refresh_action_context_is_explicit_and_running_refreshes_coalesce() {
     assert_eq!(attempts(&h, "w2"), 2);
     assert!(
         h.cmd("refresh")
-            .env("HERDR_PLUGIN_ID", "herdr-tokens")
+            .env("HERDR_PLUGIN_ID", "dmytr0x-herdr-tokens")
             .env("HERDR_PLUGIN_ACTION_ID", "refresh")
             .env("HERDR_WORKSPACE_ID", "w1")
             .output()

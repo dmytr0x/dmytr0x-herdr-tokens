@@ -91,7 +91,7 @@ ttl_ms=1500
         workspaces, panes = herdr('workspace', 'list'), herdr('pane', 'list')
         assert len(json.loads(workspaces.stdout)['result']['workspaces']) == 2
         manifest = herdr('plugin', 'link', str(ROOT))
-        assert json.loads(manifest.stdout)['result']['plugin']['plugin_id'] == 'herdr-tokens'
+        assert json.loads(manifest.stdout)['result']['plugin']['plugin_id'] == 'dmytr0x-herdr-tokens'
         w = workspace_ids[0]
         good = herdr('workspace', 'report-metadata', w, '--source', 'contract-test', '--seq', '2', '--ttl-ms', '600', '--token', 'contract=first')
         assert good.stdout == b''
@@ -160,19 +160,19 @@ ttl_ms=1500
         wait(lambda: 'git_untracked' not in metadata() and 'replacement' not in metadata())
         # Exercise the shipped actions and Herdr's actual injected paths/env.
         wait(lambda: tokens('status', check=False).returncode != 0)
-        plugin_config = Path(herdr('plugin', 'config-dir', 'herdr-tokens').stdout.decode().strip())
+        plugin_config = Path(herdr('plugin', 'config-dir', 'dmytr0x-herdr-tokens').stdout.decode().strip())
         (plugin_config / 'tokens.toml').write_text('schema_version=1\n')
         def action_status():
             return subprocess.run([str(binary), 'status', '--json', '--socket', str(root / 'api.sock')],
                                   env=env, capture_output=True, timeout=6)
-        herdr('plugin', 'action', 'invoke', 'herdr-tokens.start')
+        herdr('plugin', 'action', 'invoke', 'dmytr0x-herdr-tokens.start')
         wait(lambda: action_status().returncode == 0)
         action_identity = json.loads(action_status().stdout)['identity']
         assert action_identity['config'] == str(plugin_config)
         assert Path(action_identity['state']).is_dir()
-        herdr('plugin', 'action', 'invoke', 'herdr-tokens.reload')
-        herdr('plugin', 'action', 'invoke', 'herdr-tokens.status')
-        herdr('plugin', 'action', 'invoke', 'herdr-tokens.stop')
+        herdr('plugin', 'action', 'invoke', 'dmytr0x-herdr-tokens.reload')
+        herdr('plugin', 'action', 'invoke', 'dmytr0x-herdr-tokens.status')
+        herdr('plugin', 'action', 'invoke', 'dmytr0x-herdr-tokens.stop')
         wait(lambda: action_status().returncode != 0)
         print('PASS: isolated Herdr 0.9.1 contract, manifest actions and two-workspace acceptance checks')
     finally:
