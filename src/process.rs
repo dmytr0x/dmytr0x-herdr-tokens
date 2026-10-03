@@ -17,6 +17,18 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 
+/// Shared upper bounds used by transport and publication uncertainty accounting.
+pub const TERMINATION_GRACE: Duration = Duration::from_millis(100);
+pub const TRANSPORT_TIMEOUT: Duration = Duration::from_secs(1);
+pub const DELIVERY_BOUND: Duration = TRANSPORT_TIMEOUT.saturating_add(TERMINATION_GRACE);
+
+struct ProcessGroup(Pid);
+impl Drop for ProcessGroup {
+    fn drop(&mut self) {
+        let _ = killpg(self.0, Signal::SIGKILL);
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum Error {
     #[error("process launch/io failure")]
@@ -137,6 +149,7 @@ pub async fn execute(req: Request, cancel: CancellationToken) -> Result<Output, 
         .kill_on_drop(true);
     let mut child = cmd.spawn().map_err(|_| Error::Io)?;
     let pid = Pid::from_raw(child.id().ok_or(Error::Io)? as i32);
+    let group = ProcessGroup(pid);
     let stdout = child.stdout.take().ok_or(Error::Io)?;
     let stderr = child.stderr.take().ok_or(Error::Io)?;
     let operation = async {
@@ -161,9 +174,10 @@ pub async fn execute(req: Request, cancel: CancellationToken) -> Result<Output, 
     // Even a successful direct child may leave descendants that closed their pipes.
     // Never recycle a permit before its group has been terminated.
     if killpg(pid, Signal::SIGTERM).is_ok() {
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        tokio::time::sleep(TERMINATION_GRACE).await;
         let _ = killpg(pid, Signal::SIGKILL);
     }
     let _ = child.wait().await;
+    std::mem::forget(group); // Explicit termination and reaping completed.
     result
 }

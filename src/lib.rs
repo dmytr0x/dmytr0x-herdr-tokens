@@ -7,6 +7,7 @@ pub mod providers;
 pub mod publisher;
 pub mod runner;
 pub mod runtime;
+mod task;
 
 const PLUGIN_ID: &str = "dmytr0x-herdr-tokens";
 

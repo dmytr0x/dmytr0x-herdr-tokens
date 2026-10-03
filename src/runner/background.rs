@@ -3,6 +3,7 @@
 mod tests;
 
 use super::{Workspace, job::jitter};
+use crate::task::OwnedTask;
 use crate::{
     config::{Job, Worktrees},
     diagnostics::{BackgroundStatus, LastRun, TargetStatus},
@@ -14,7 +15,7 @@ use std::{
     path::PathBuf,
     time::Duration,
 };
-use tokio::{task::JoinHandle, time::Instant};
+use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -86,11 +87,11 @@ pub(super) async fn resolve(
 struct Run {
     started: Instant,
     cancel: CancellationToken,
-    resolve: Option<JoinHandle<Resolution>>,
+    resolve: Option<OwnedTask<Resolution>>,
     chunks: VecDeque<Vec<Target>>,
     /// 1-based index of the latest started chunk, and the chunk count.
     chunk: (usize, usize),
-    current: Vec<(PathBuf, JoinHandle<JobOutcome>)>,
+    current: Vec<(PathBuf, OwnedTask<JobOutcome>)>,
     next_chunk_at: Instant,
     targets: u64,
     succeeded: u64,
@@ -169,10 +170,10 @@ impl BackgroundJob {
         self.signal_cancel();
         if let Some(run) = self.run.take() {
             if let Some(task) = run.resolve {
-                let _ = task.await;
+                let _ = task.join().await;
             }
             for (_, task) in run.current {
-                let _ = task.await;
+                let _ = task.join().await;
             }
         }
         for target in self.status.targets.values_mut() {
@@ -194,7 +195,7 @@ impl BackgroundJob {
             }
             return;
         };
-        if run.resolve.as_ref().is_some_and(JoinHandle::is_finished) {
+        if run.resolve.as_ref().is_some_and(OwnedTask::is_finished) {
             self.resolved(endpoint).await;
         }
         self.collect(endpoint).await;
@@ -222,13 +223,12 @@ impl BackgroundJob {
             .collect();
         let cancel = CancellationToken::new();
         let now = Instant::now();
+        let mode = self.job.worktrees;
         self.run = Some(Run {
             started: now,
-            resolve: Some(tokio::spawn(resolve(
-                inputs,
-                self.job.worktrees,
-                cancel.clone(),
-            ))),
+            resolve: Some(OwnedTask::spawn(cancel.child_token(), move |cancel| {
+                resolve(inputs, mode, cancel)
+            })),
             cancel,
             chunks: VecDeque::new(),
             chunk: (0, 0),
@@ -246,7 +246,7 @@ impl BackgroundJob {
             job, status, run, ..
         } = self;
         let run = run.as_mut().expect("active run");
-        let resolution = match run.resolve.take().expect("resolution").await {
+        let resolution = match run.resolve.take().expect("resolution").join().await {
             Ok(resolution) => resolution,
             Err(_) => {
                 // Preserve the previous target diagnostics: discovery did not succeed.
@@ -309,7 +309,7 @@ impl BackgroundJob {
                 continue;
             }
             let (dir, task) = run.current.swap_remove(i);
-            let outcome = task.await.unwrap_or_else(|_| JobOutcome {
+            let outcome = task.join().await.unwrap_or_else(|_| JobOutcome {
                 error: Some("job task panicked".into()),
                 ..JobOutcome::default()
             });
@@ -361,7 +361,9 @@ impl BackgroundJob {
             let cancel = run.cancel.clone();
             run.current.push((
                 target.dir,
-                tokio::spawn(async move { providers::run_job(&job, &dir, &ids, cancel).await }),
+                OwnedTask::spawn(cancel.child_token(), move |cancel| async move {
+                    providers::run_job(&job, &dir, &ids, cancel).await
+                }),
             ));
         }
     }

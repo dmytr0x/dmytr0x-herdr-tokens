@@ -35,8 +35,7 @@ fn generation() -> Generation {
 }
 
 fn complete(job: &mut Job, result: Result<Collected, providers::Error>) {
-    job.cancel = Some(CancellationToken::new());
-    job.task = Some(tokio::spawn(async move {
+    job.task = Some(OwnedTask::spawn(CancellationToken::new(), |_| async move {
         Completion {
             generation: generation(),
             result,
@@ -71,7 +70,6 @@ async fn idle_refresh_is_immediate_and_running_refreshes_coalesce() {
     assert_eq!(job.due, Instant::now());
     assert!(!job.refresh);
     assert!(job.task.is_none());
-    assert!(job.cancel.is_none());
 }
 
 #[tokio::test(start_paused = true)]
@@ -144,15 +142,15 @@ async fn every_generation_and_disconnection_fences_completions() {
         assert!(job.status.last_collected.is_none());
         assert!(job.status.duration_ms.is_none());
         assert!(job.task.is_none());
-        assert!(job.cancel.is_none());
     }
 }
 
 #[tokio::test]
 async fn aborted_task_is_a_failure_not_a_publication() {
     let mut job = job();
-    job.task = Some(tokio::spawn(std::future::pending()));
-    job.task.as_ref().unwrap().abort();
+    job.task = Some(OwnedTask::spawn(CancellationToken::new(), |_| async {
+        panic!("injected failure")
+    }));
     assert!(
         job.finish(generation(), true, "endpoint", None)
             .await

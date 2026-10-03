@@ -84,3 +84,52 @@ async fn explicit_environment_and_cwd() {
         format!("{}|allowed|unset", r.cwd.display())
     );
 }
+
+#[tokio::test]
+async fn aborting_supervisor_kills_the_entire_group() {
+    let dir = tempfile::tempdir().unwrap();
+    let started = dir.path().join("started");
+    let leaked = dir.path().join("leaked");
+    let script = format!(
+        "(sleep 0.6; touch '{}') & touch '{}'; sleep 20",
+        leaked.display(),
+        started.display()
+    );
+    let mut req = request(&script);
+    req.timeout = Duration::from_secs(30);
+    let task = tokio::spawn(process::execute(req, CancellationToken::new()));
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    while !started.exists() {
+        assert!(tokio::time::Instant::now() < deadline);
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    task.abort();
+    assert!(matches!(task.await, Err(error) if error.is_cancelled()));
+    tokio::time::sleep(Duration::from_millis(800)).await;
+    assert!(!leaked.exists());
+}
+
+#[tokio::test]
+async fn cancellation_while_draining_reaps_descendants() {
+    let dir = tempfile::tempdir().unwrap();
+    let started = dir.path().join("started");
+    let leaked = dir.path().join("leaked");
+    let script = format!(
+        "(touch '{}'; sleep 0.6; touch '{}') & exit 0",
+        started.display(),
+        leaked.display()
+    );
+    let mut req = request(&script);
+    req.timeout = Duration::from_secs(30);
+    let cancel = CancellationToken::new();
+    let task = tokio::spawn(process::execute(req, cancel.clone()));
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    while !started.exists() {
+        assert!(tokio::time::Instant::now() < deadline);
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    cancel.cancel();
+    assert!(matches!(task.await.unwrap(), Err(Error::Cancelled)));
+    tokio::time::sleep(Duration::from_millis(700)).await;
+    assert!(!leaked.exists());
+}

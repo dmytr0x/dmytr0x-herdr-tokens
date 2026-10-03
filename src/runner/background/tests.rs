@@ -139,8 +139,10 @@ async fn unresolvable_targets_fail_without_running() {
         error: Some("main worktree unavailable".into()),
     };
     let run = job.run.as_mut().unwrap();
-    run.resolve.take().unwrap().abort();
-    run.resolve = Some(tokio::spawn(async move {
+    let previous = run.resolve.take().unwrap();
+    previous.cancel();
+    let _ = previous.join().await;
+    run.resolve = Some(OwnedTask::spawn(CancellationToken::new(), |_| async move {
         Resolution {
             targets: vec![failed],
             skipped: 0,
@@ -282,8 +284,10 @@ async fn nine_targets_split_into_chunks_of_four_four_one() {
     job.trigger();
     job.tick(true, &w, "test").await;
     let run = job.run.as_mut().unwrap();
-    run.resolve.take().unwrap().abort();
-    run.resolve = Some(tokio::spawn(async {
+    let previous = run.resolve.take().unwrap();
+    previous.cancel();
+    let _ = previous.join().await;
+    run.resolve = Some(OwnedTask::spawn(CancellationToken::new(), |_| async {
         Resolution {
             targets: (0..9)
                 .map(|i| Target {
@@ -342,8 +346,10 @@ async fn resolver_panic_retains_diagnostics_and_counts_failure() {
         .insert(PathBuf::from("/previous"), TargetStatus::default());
     job.start(&BTreeMap::new());
     let run = job.run.as_mut().unwrap();
-    run.resolve.take().unwrap().await.unwrap();
-    run.resolve = Some(tokio::spawn(async { panic!("injected resolver failure") }));
+    run.resolve.take().unwrap().join().await.unwrap();
+    run.resolve = Some(OwnedTask::spawn(CancellationToken::new(), |_| async {
+        panic!("injected resolver failure")
+    }));
     job.resolved("test").await;
     job.finish();
     assert_eq!(job.status.last_run.as_ref().unwrap().failed, 1);

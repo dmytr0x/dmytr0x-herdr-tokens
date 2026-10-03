@@ -8,7 +8,6 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
-    time::Duration,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -74,7 +73,7 @@ pub struct Directory {
 }
 pub type Discovery = BTreeMap<String, Directory>;
 impl Herdr {
-    async fn call(&self, args: Vec<String>) -> Result<Vec<u8>, Error> {
+    async fn call(&self, args: Vec<String>, cancel: CancellationToken) -> Result<Vec<u8>, Error> {
         let mut env = process::environment();
         env.insert("HERDR_SOCKET_PATH".into(), self.socket.as_os_str().into());
         let mut argv = vec![self.binary.as_os_str().into()];
@@ -84,12 +83,12 @@ impl Herdr {
                 argv,
                 cwd: PathBuf::from("/"),
                 env,
-                timeout: Duration::from_secs(1),
+                timeout: process::TRANSPORT_TIMEOUT,
                 stdout_limit: 4 * 1_048_576,
                 stderr_limit: 65536,
                 capture: process::Capture::Bounded,
             },
-            CancellationToken::new(),
+            cancel,
         )
         .await
         .map_err(|e| match e {
@@ -118,10 +117,18 @@ impl Herdr {
         })
     }
     pub async fn discover(&self, config: &Config) -> Result<Discovery, Error> {
+        self.discover_cancelled(config, CancellationToken::new())
+            .await
+    }
+    pub(crate) async fn discover_cancelled(
+        &self,
+        config: &Config,
+        cancel: CancellationToken,
+    ) -> Result<Discovery, Error> {
         // Do not use try_join!: early return would drop the other process's cleanup future.
         let (workspaces, panes) = tokio::join!(
-            self.call(vec!["workspace".into(), "list".into()]),
-            self.call(vec!["pane".into(), "list".into()])
+            self.call(vec!["workspace".into(), "list".into()], cancel.clone()),
+            self.call(vec!["pane".into(), "list".into()], cancel)
         );
         decode(&workspaces?, &panes?, config)
     }
@@ -131,6 +138,17 @@ impl Herdr {
         patch: &Patch,
         seq: u64,
         ttl_ms: u64,
+    ) -> Result<(), Error> {
+        self.report_cancelled(workspace, patch, seq, ttl_ms, CancellationToken::new())
+            .await
+    }
+    pub(crate) async fn report_cancelled(
+        &self,
+        workspace: &str,
+        patch: &Patch,
+        seq: u64,
+        ttl_ms: u64,
+        cancel: CancellationToken,
     ) -> Result<(), Error> {
         if patch.is_empty() || patch.len() > 16 {
             return Err(Error::Semantic);
@@ -158,7 +176,7 @@ impl Herdr {
                 }
             }
         }
-        self.call(args).await.map(|_| ())
+        self.call(args, cancel).await.map(|_| ())
     }
 }
 fn envelope<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Result<T, Error> {

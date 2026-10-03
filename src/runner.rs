@@ -1,6 +1,7 @@
 //! Single coordinator: tasks do IO, only this module commits state transitions.
 mod background;
 mod job;
+use crate::task::OwnedTask;
 use crate::{
     config::{Config, Snapshot},
     diagnostics::JobStatus,
@@ -17,7 +18,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     time::Duration,
 };
-use tokio::{sync::mpsc, task::JoinHandle, time::Instant};
+use tokio::{sync::mpsc, time::Instant};
 use tokio_util::sync::CancellationToken;
 
 struct Workspace {
@@ -27,7 +28,7 @@ struct Workspace {
 struct Report {
     send: Publication,
     seq: u64,
-    task: JoinHandle<Result<(), herdr::Error>>,
+    task: OwnedTask<Result<(), herdr::Error>>,
 }
 struct Coordinator {
     identity: Identity,
@@ -47,7 +48,7 @@ struct Coordinator {
     report_errors: BTreeMap<String, (String, u64)>,
     sequences: Sequences,
     report: Option<Report>,
-    discovery: Option<JoinHandle<Result<Discovery, herdr::Error>>>,
+    discovery: Option<OwnedTask<Result<Discovery, herdr::Error>>>,
     discover_due: Instant,
     backoff: u64,
     started: Instant,
@@ -95,30 +96,28 @@ impl Coordinator {
     }
     async fn cancel_workspace_jobs(&mut self) {
         for job in self.jobs.values() {
-            if let Some(cancel) = &job.cancel {
+            if let Some(cancel) = &job.task {
                 cancel.cancel();
             }
         }
         for job in self.jobs.values_mut() {
             if let Some(task) = job.task.take() {
-                let _ = task.await;
+                let _ = task.join().await;
             }
-            job.cancel = None;
         }
     }
     async fn cancel_jobs(&mut self) {
         for job in self.jobs.values().chain(self.global_jobs.values()) {
-            if let Some(c) = &job.cancel {
+            if let Some(c) = &job.task {
                 c.cancel();
             }
         }
         // All cancellations were issued together; cleanup grace is concurrent.
         for job in self.jobs.values_mut().chain(self.global_jobs.values_mut()) {
             if let Some(task) = job.task.take() {
-                let _ = task.await;
+                let _ = task.join().await;
                 job.due = Instant::now();
             }
-            job.cancel = None;
         }
     }
     async fn disconnect(&mut self) {
@@ -142,7 +141,7 @@ impl Coordinator {
         let Some(report) = self.report.take() else {
             return Ok(());
         };
-        let result = report.task.await.unwrap_or(Err(herdr::Error::Task));
+        let result = report.task.join().await.unwrap_or(Err(herdr::Error::Task));
         if result.is_ok() {
             self.publisher.acknowledged(&report.send);
             self.report_errors.remove(&report.send.workspace);
@@ -200,7 +199,7 @@ impl Coordinator {
     async fn remove_workspace(&mut self, id: &str) {
         for ((w, _), job) in &mut self.jobs {
             if w == id
-                && let Some(c) = &job.cancel
+                && let Some(c) = &job.task
             {
                 c.cancel();
             }
@@ -210,7 +209,7 @@ impl Coordinator {
             if let Some(mut job) = self.jobs.remove(&key)
                 && let Some(t) = job.task.take()
             {
-                let _ = t.await;
+                let _ = t.join().await;
             }
         }
         self.workspaces.remove(id);
@@ -419,7 +418,8 @@ impl Coordinator {
         self.finish_report().await?;
         // Discovery results computed using old overrides must never be committed.
         if let Some(discovery) = self.discovery.take() {
-            let _ = discovery.await;
+            discovery.cancel();
+            let _ = discovery.join().await;
         }
         self.config_generation += 1;
         self.publisher.discard_values();
@@ -492,9 +492,9 @@ impl Coordinator {
         if self.report.as_ref().is_some_and(|r| r.task.is_finished()) {
             self.finish_report().await?;
         }
-        if self.discovery.as_ref().is_some_and(JoinHandle::is_finished) {
+        if self.discovery.as_ref().is_some_and(OwnedTask::is_finished) {
             let discovery = self.discovery.take().expect("discovery");
-            match discovery.await.unwrap_or(Err(herdr::Error::Task)) {
+            match discovery.join().await.unwrap_or(Err(herdr::Error::Task)) {
                 Ok(snapshot) => {
                     self.reconcile(snapshot).await?;
                     self.discover_due = Instant::now()
@@ -519,7 +519,10 @@ impl Coordinator {
         if self.discovery.is_none() && Instant::now() >= self.discover_due {
             let herdr = self.herdr.clone();
             let config = self.config.clone();
-            self.discovery = Some(tokio::spawn(async move { herdr.discover(&config).await }));
+            self.discovery = Some(OwnedTask::spawn(
+                CancellationToken::new(),
+                move |cancel| async move { herdr.discover_cancelled(&config, cancel).await },
+            ));
         }
         let finished: Vec<_> = self
             .jobs
@@ -694,7 +697,11 @@ impl Coordinator {
             self.report = Some(Report {
                 send,
                 seq,
-                task: tokio::spawn(async move { herdr.report(&workspace, &patch, seq, ttl).await }),
+                task: OwnedTask::spawn(CancellationToken::new(), move |cancel| async move {
+                    herdr
+                        .report_cancelled(&workspace, &patch, seq, ttl, cancel)
+                        .await
+                }),
             });
         }
         Ok(())
@@ -787,6 +794,12 @@ impl Coordinator {
     async fn shutdown(&mut self) {
         let deadline = Instant::now() + Duration::from_secs(5);
         self.config_generation += 1;
+        if let Some(report) = &self.report {
+            report.task.cancel();
+        }
+        if let Some(discovery) = &self.discovery {
+            discovery.cancel();
+        }
         for job in self.background.values() {
             job.signal_cancel();
         }
@@ -794,7 +807,8 @@ impl Coordinator {
         self.cancel_background().await;
         let _ = self.finish_report().await;
         if let Some(discovery) = self.discovery.take() {
-            let _ = discovery.await;
+            discovery.cancel();
+            let _ = discovery.join().await;
         }
         self.publisher.discard_values();
         for id in self.workspaces.keys() {
@@ -802,7 +816,7 @@ impl Coordinator {
         }
         while self.connection == "Connected"
             && self.publisher.has_clears()
-            && Instant::now() + Duration::from_millis(1200) < deadline
+            && Instant::now() + crate::process::DELIVERY_BOUND < deadline
         {
             if self.dispatch_report().is_err() {
                 break;
@@ -846,6 +860,8 @@ pub async fn run(
     );
     let sequences = Sequences::open(state, &lock)?;
     let listener = endpoint.bind(&lock)?;
+    let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+    let mut interrupt = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
     let (tx, mut rx) = mpsc::channel(32);
     let control_cancel = CancellationToken::new();
     let control_task = tokio::spawn(runtime::serve(
@@ -884,8 +900,6 @@ pub async fn run(
     };
     c.rebuild_background().await;
     tracing::info!(endpoint = %endpoint.hash, generation = 1, "runner ready");
-    let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
-    let mut interrupt = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
     let mut tick = tokio::time::interval(Duration::from_millis(20));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let result = loop {

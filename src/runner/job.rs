@@ -1,6 +1,7 @@
 #[cfg(test)]
 mod tests;
 
+use crate::task::OwnedTask;
 use crate::{
     config::{Collector, hash},
     diagnostics::JobStatus,
@@ -8,16 +9,15 @@ use crate::{
     publisher::{Generation, Key},
 };
 use std::{path::PathBuf, time::Duration};
-use tokio::{task::JoinHandle, time::Instant};
+use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 pub(super) struct Job {
     pub collector: Collector,
     pub due: Instant,
     pub order: u64,
-    pub cancel: Option<CancellationToken>,
     pub refresh: bool,
-    pub task: Option<JoinHandle<Completion>>,
+    pub task: Option<OwnedTask<Completion>>,
     pub status: JobStatus,
     pub cached: Option<Cached>,
 }
@@ -50,7 +50,6 @@ impl Job {
             due,
             order,
             status,
-            cancel: None,
             refresh: false,
             task: None,
             cached: None,
@@ -75,7 +74,6 @@ impl Job {
     ) {
         let collector = self.collector.clone();
         let cancel = CancellationToken::new();
-        let child_cancel = cancel.clone();
         let start = Instant::now();
         self.order = order;
         if start.saturating_duration_since(self.due) > Duration::from_millis(collector.interval_ms)
@@ -94,19 +92,13 @@ impl Job {
                 collector.interval_ms + jitter(&key, order, collector.interval_ms / 10),
             );
         self.status.attempted = Some(start);
-        self.cancel = Some(cancel);
-        self.task = Some(tokio::spawn(async move {
-            // Catch provider panics without losing completion timing or generation fencing.
-            let result = tokio::spawn(async move {
-                match workspace {
-                    Some(workspace) => {
-                        providers::collect(&collector, &workspace, &cwd, child_cancel).await
-                    }
-                    None => providers::collect_global(&collector, &cwd, child_cancel).await,
+        self.task = Some(OwnedTask::spawn(cancel, move |child_cancel| async move {
+            let result = match workspace {
+                Some(workspace) => {
+                    providers::collect(&collector, &workspace, &cwd, child_cancel).await
                 }
-            })
-            .await
-            .unwrap_or(Err(providers::Error::Panic));
+                None => providers::collect_global(&collector, &cwd, child_cancel).await,
+            };
             Completion {
                 generation,
                 result,
@@ -123,8 +115,7 @@ impl Job {
         endpoint: &str,
         workspace: Option<&str>,
     ) -> Option<Cached> {
-        let completion = self.task.take().expect("finished task").await;
-        self.cancel = None;
+        let completion = self.task.take().expect("finished task").join().await;
         if self.refresh {
             self.due = Instant::now();
             self.refresh = false;
