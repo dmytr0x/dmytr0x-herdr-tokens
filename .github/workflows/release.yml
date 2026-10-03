@@ -55,7 +55,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.94.0
         with:
           components: rustfmt, clippy
-      - run: sh -n scripts/*.sh
+      - run: for script in scripts/*.sh; do sh -n "$script" || exit; done
+      - run: python3 -m unittest discover -s tests -p 'test_*.py'
       - run: cargo fmt --check
       - run: cargo clippy --locked --all-targets -- -D warnings
       - run: cargo test --locked
@@ -97,6 +98,20 @@ jobs:
           cp "target/${TARGET}/release/herdr-tokens" staging/herdr-tokens
           chmod 755 staging/herdr-tokens
           COPYFILE_DISABLE=1 tar -C staging -czf "$archive" herdr-tokens
+      - name: Smoke test packaged executable
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          mkdir smoke
+          tar -xzf herdr-tokens-*.tar.gz -C smoke
+          case "$(uname -m):$TARGET" in
+            x86_64:x86_64-*|arm64:aarch64-*|aarch64:aarch64-*)
+              ./smoke/herdr-tokens --version
+              ./smoke/herdr-tokens validate --config-dir "$PWD/examples"
+              echo "$TARGET: packaged binary version and example validation passed on $(uname -sm)" >> "$GITHUB_STEP_SUMMARY"
+              ;;
+            *) echo "$TARGET: built and packaged; not executed on $(uname -sm)" >> "$GITHUB_STEP_SUMMARY" ;;
+          esac
       - uses: actions/upload-artifact@v7
         with:
           name: herdr-tokens-${{ matrix.target }}
@@ -111,6 +126,7 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v7
       - uses: actions/download-artifact@v8
         with:
           path: dist
@@ -121,14 +137,4 @@ jobs:
           RELEASE_TAG: ${{ github.ref_name }}
           GH_REPO: ${{ github.repository }}
         working-directory: dist
-        run: |
-          sha256sum herdr-tokens-*.tar.gz > SHA256SUMS
-          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
-            gh release upload "$RELEASE_TAG" ./*.tar.gz SHA256SUMS --clobber
-          else
-            gh release create "$RELEASE_TAG" \
-              --verify-tag \
-              --title "$RELEASE_TAG" \
-              --generate-notes \
-              ./*.tar.gz SHA256SUMS
-          fi
+        run: sh ../scripts/publish-release.sh

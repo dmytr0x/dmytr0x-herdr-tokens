@@ -18,7 +18,8 @@ jobs:
         with:
           python-version: '3.x'
       - uses: Swatinem/rust-cache@v2
-      - run: sh -n scripts/*.sh
+      - run: for script in scripts/*.sh; do sh -n "$script" || exit; done
+      - run: python3 -m unittest discover -s tests -p 'test_*.py'
       - run: cargo fmt --check
       - run: cargo clippy --locked --all-targets -- -D warnings
       - run: cargo test --locked
