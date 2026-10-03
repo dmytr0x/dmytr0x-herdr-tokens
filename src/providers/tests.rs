@@ -156,3 +156,41 @@ async fn resolution_distinguishes_absence_cancellation_and_unavailable_paths() {
         assert_eq!(ResolutionError::from(error).to_string(), message);
     }
 }
+
+#[test]
+fn text_requires_utf8_even_inside_removed_escapes() {
+    let mappings = BTreeMap::from([("status".into(), "stdout".into())]);
+    for bytes in [b"\x1b]0;\xff\x07ok".as_slice(), b"\x1b[\xffmok"] {
+        assert!(command::parse_text(bytes, &mappings).is_err());
+    }
+    assert_eq!(
+        command::parse_text("\x1b[31m界\x1b[0m".as_bytes(), &mappings)
+            .unwrap()
+            .0["status"],
+        Token::Set("界".into())
+    );
+}
+
+#[test]
+fn nul_worktree_records_preserve_unusual_path_bytes_and_bare_repositories() {
+    for path in [
+        b"/ordinary".as_slice(),
+        b"/space name",
+        b"/new\nline\tquote\"\\\xff",
+    ] {
+        for kind in ["bare".to_owned(), format!("HEAD {}", "a".repeat(40))] {
+            let mut bytes = b"worktree ".to_vec();
+            bytes.extend_from_slice(path);
+            bytes.extend_from_slice(format!("\0{kind}\0\0").as_bytes());
+            assert_eq!(main_worktree_record(&bytes).unwrap(), path);
+        }
+    }
+    for bytes in [
+        b"worktree /repo\nbare\n\n".as_slice(),
+        b"worktree /repo\0HEAD bad\0\0",
+        b"worktree /repo\0bare",
+        b"worktree \0bare\0\0",
+    ] {
+        assert!(main_worktree_record(bytes).is_err());
+    }
+}

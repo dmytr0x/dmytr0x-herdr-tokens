@@ -96,6 +96,7 @@ pub(super) fn parse_text(
     bytes: &[u8],
     mappings: &BTreeMap<String, TokenMapping>,
 ) -> Result<(Patch, bool), Error> {
+    std::str::from_utf8(bytes).map_err(|_| Error::InvalidOutput)?;
     let plain = strip_ansi(bytes);
     let value = std::str::from_utf8(&plain).map_err(|_| Error::InvalidOutput)?;
     let mut patch = Patch::new();

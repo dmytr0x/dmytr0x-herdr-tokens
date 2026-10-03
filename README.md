@@ -269,7 +269,7 @@ env_allow = ["SSH_AUTH_SOCK"]
 | `chunk_delay_ms` | 0 | 0–interval |
 | `env`, `env_allow` | empty | same rules as collectors |
 
-At most 16 jobs; `[[jobs]]` is allowed in `tokens.d` fragments. Any job enables the Git ≥ 2.20 check.
+At most 16 jobs; `[[jobs]]` is allowed in `tokens.d` fragments. Any job enables the Git ≥ 2.36 check.
 
 **Targets.** Each run takes every workspace with a resolved directory (same priority as workspace-scoped collectors) and asks Git for its worktree and common directory. Directories outside a Git work tree are counted as `skipped`. With `worktrees = "main"` the command runs once per repository in its main worktree (the repository directory for a bare repository), even if no workspace has the main worktree open; linked worktrees share refs and objects, so this is enough for `fetch`. With `worktrees = "all"` it runs once per distinct open worktree. Targets are sorted by path.
 

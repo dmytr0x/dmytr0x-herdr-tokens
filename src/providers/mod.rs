@@ -193,26 +193,29 @@ pub async fn main_worktree(
         cancel.clone(),
     )
     .await?;
-    let first = if out.status.success() {
-        out.stdout
-            .split(|&b| b == 0)
-            .next()
-            .ok_or(ResolutionError::Malformed)?
-            .to_vec()
-    } else {
-        let out = successful(git(&["worktree", "list", "--porcelain"], common_dir, cancel).await?)?;
-        let end = out
-            .windows(b"\nHEAD ".len())
-            .position(|w| w == b"\nHEAD ")
-            .ok_or(ResolutionError::Malformed)?;
-        out[..end].to_vec()
-    };
-    line_path(
-        first
-            .strip_prefix(b"worktree ")
-            .ok_or(ResolutionError::Malformed)?,
-        common_dir,
-    )
+    let bytes = successful(out)?;
+    line_path(main_worktree_record(&bytes)?, common_dir)
+}
+/// NUL porcelain paths are literal bytes, not C-quoted strings. Reject legacy
+/// newline records rather than guessing at embedded newlines or quote escapes.
+fn main_worktree_record(bytes: &[u8]) -> Result<&[u8], ResolutionError> {
+    let mut fields = bytes.split(|b| *b == 0);
+    let path = fields
+        .next()
+        .and_then(|s| s.strip_prefix(b"worktree "))
+        .ok_or(ResolutionError::Malformed)?;
+    let kind = fields.next().ok_or(ResolutionError::Malformed)?;
+    if path.is_empty()
+        || !path.starts_with(b"/")
+        || !bytes.ends_with(b"\0\0")
+        || !(kind == b"bare"
+            || kind.strip_prefix(b"HEAD ").is_some_and(|hash| {
+                [40, 64].contains(&hash.len()) && hash.iter().all(u8::is_ascii_hexdigit)
+            }))
+    {
+        return Err(ResolutionError::Malformed);
+    }
+    Ok(path)
 }
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct JobOutcome {
@@ -305,8 +308,8 @@ pub async fn preflight(config: &Config) -> anyhow::Result<()> {
         .and_then(|v| v.parse::<u32>().ok())
         .unwrap_or(0);
     anyhow::ensure!(
-        result.status.success() && (major > 2 || major == 2 && minor >= 20),
-        "Git >= 2.20 is required"
+        result.status.success() && (major > 2 || major == 2 && minor >= 36),
+        "Git >= 2.36 is required"
     );
     Ok(())
 }
