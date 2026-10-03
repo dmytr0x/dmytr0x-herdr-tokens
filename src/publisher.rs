@@ -5,7 +5,28 @@ use std::{
     time::Duration,
 };
 use tokio::time::Instant;
-pub type Key = (String, String);
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct CollectionKey {
+    pub workspace: String,
+    pub collector: String,
+}
+impl CollectionKey {
+    pub fn new(workspace: impl Into<String>, collector: impl Into<String>) -> Self {
+        Self {
+            workspace: workspace.into(),
+            collector: collector.into(),
+        }
+    }
+}
+impl From<(String, String)> for CollectionKey {
+    fn from((workspace, collector): (String, String)) -> Self {
+        Self {
+            workspace,
+            collector,
+        }
+    }
+}
+pub type Key = CollectionKey;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Generation {
     pub config: u64,
@@ -53,7 +74,7 @@ impl Publisher {
         self.pending.clear();
     }
     pub fn remove_workspace(&mut self, workspace: &str) {
-        self.pending.retain(|(w, _), _| w != workspace);
+        self.pending.retain(|key, _| key.workspace != workspace);
         self.barriers.remove(workspace);
         self.expiry.remove(workspace);
     }
@@ -61,7 +82,7 @@ impl Publisher {
         if keys.is_empty() {
             return;
         }
-        self.pending.retain(|(w, _), _| w != workspace);
+        self.pending.retain(|key, _| key.workspace != workspace);
         let now = Instant::now();
         let until = self.expiry.get(workspace).copied().unwrap_or(now);
         let barrier = self.barriers.entry(workspace.into()).or_insert(Barrier {
@@ -134,7 +155,7 @@ impl Publisher {
         let key = self
             .pending
             .iter()
-            .filter(|((w, _), _)| !self.barriers.contains_key(w))
+            .filter(|(key, _)| !self.barriers.contains_key(&key.workspace))
             .min_by_key(|(_, (ticket, _))| ticket)
             .map(|(k, _)| k.clone());
         let send = key.map(|key| {
@@ -144,7 +165,7 @@ impl Publisher {
                 .saturating_sub(now.duration_since(p.completed))
                 .as_millis() as u64;
             Publication {
-                workspace: key.0.clone(),
+                workspace: key.workspace.clone(),
                 patch: p.patch,
                 ttl_ms: remaining,
                 job: Some((key, p.generation)),

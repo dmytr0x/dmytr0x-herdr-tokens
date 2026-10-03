@@ -9,7 +9,7 @@ use std::{
 use tokio::time::Instant;
 fn pending(workspace: &str, name: &str, value: &str) -> Pending {
     Pending {
-        key: (workspace.into(), name.into()),
+        key: Key::new(workspace, name),
         generation: Generation {
             config: 1,
             directory: 1,
@@ -60,7 +60,7 @@ async fn clear_without_known_values_is_attempted_and_removal_is_workspace_local(
     assert!(clear.patch.values().all(|token| *token == Token::Clear));
     publisher.remove_workspace("w1");
     assert!(publisher.pending_clears("w1").is_empty());
-    assert!(!publisher.has_pending(&("w1".into(), "a".into())));
+    assert!(!publisher.has_pending(&Key::new("w1", "a")));
     assert_eq!(publisher.next(|_, _| true).0.unwrap().workspace, "w2");
 }
 
@@ -71,7 +71,7 @@ async fn disconnect_discards_values_but_preserves_clear_obligations() {
     publisher.put(pending("w1", "a", "new"));
     publisher.discard_values();
     assert!(publisher.has_clears());
-    assert!(!publisher.has_pending(&("w1".into(), "a".into())));
+    assert!(!publisher.has_pending(&Key::new("w1", "a")));
     assert!(publisher.next(|_, _| true).0.unwrap().job.is_none());
 }
 
@@ -87,7 +87,7 @@ async fn latest_patch_fairness_freshness_and_remaining_ttl() {
     let s = s.unwrap();
     assert_eq!(s.patch["token"], Token::Set("new".into()));
     assert_eq!(s.ttl_ms, 2800);
-    assert_eq!(p.next(|_, _| true).0.unwrap().job.unwrap().0.1, "b");
+    assert_eq!(p.next(|_, _| true).0.unwrap().job.unwrap().0.collector, "b");
     p.put(pending("w1", "a", "stale"));
     tokio::time::advance(Duration::from_millis(1001)).await;
     let (s, stale) = p.next(|_, _| true);

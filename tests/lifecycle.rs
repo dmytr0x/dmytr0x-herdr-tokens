@@ -938,3 +938,36 @@ fn changed_job_reload_and_stop_kill_running_process_groups() {
     assert!(started.elapsed() < Duration::from_secs(5));
     assert!(!alive(&second));
 }
+
+#[test]
+fn workspace_changes_preserve_unrelated_inflight_collectors() {
+    let mut h = Harness::new();
+    let script = "echo $$ > started; while [ ! -f release ]; do sleep 0.02; done; printf ready";
+    let argv = serde_json::to_string(&["/bin/sh", "-c", script]).unwrap();
+    h.atomic("config/tokens.toml", &format!("schema_version=1\n[runtime]\ndiscovery_interval_ms=1000\n[[collectors]]\nname='slow'\nprovider='command'\ncommand={argv}\noutput='text'\ninterval_ms=30000\ntimeout_ms=10000\n[collectors.tokens]\nvalue='stdout'\n"));
+    h.settings(json!({"workspaces":{"w1":h.root.join("w1")}}));
+    h.spawn();
+    h.wait(|h| h.root.join("w1/started").exists());
+    let first_pid = fs::read_to_string(h.root.join("w1/started")).unwrap();
+    h.settings(json!({"workspaces":{"w1":h.root.join("w1"),"w2":h.root.join("w2")}}));
+    h.wait(|h| h.root.join("w2/started").exists());
+    assert_eq!(
+        fs::read_to_string(h.root.join("w1/started")).unwrap(),
+        first_pid
+    );
+    assert!(alive(&h.root.join("w1/started")));
+    fs::create_dir(h.root.join("changed")).unwrap();
+    h.settings(json!({"workspaces":{"w1":h.root.join("w1"),"w2":h.root.join("changed")}}));
+    h.wait(|h| h.root.join("changed/started").exists());
+    assert_eq!(
+        fs::read_to_string(h.root.join("w1/started")).unwrap(),
+        first_pid
+    );
+    assert!(alive(&h.root.join("w1/started")));
+    fs::write(h.root.join("w1/release"), "").unwrap();
+    h.wait(|h| h.reports().iter().any(|r| token_report(r, "value")));
+    let stopped = Instant::now();
+    h.stop();
+    assert!(stopped.elapsed() < Duration::from_secs(6));
+    assert!(!alive(&h.root.join("changed/started")));
+}

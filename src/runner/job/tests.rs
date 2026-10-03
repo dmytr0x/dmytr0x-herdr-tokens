@@ -5,8 +5,8 @@ use crate::{
 };
 use std::collections::BTreeMap;
 
-fn job() -> Job {
-    Job::new(
+fn job() -> CollectorTask {
+    CollectorTask::new(
         Collector {
             name: "status".into(),
             kind: CollectorKind::Command {
@@ -37,7 +37,7 @@ fn generation() -> Generation {
     }
 }
 
-fn complete(job: &mut Job, result: Result<Collected, providers::Error>) {
+fn complete(job: &mut CollectorTask, result: Result<Collected, providers::Error>) {
     job.task = Some(OwnedTask::spawn(CancellationToken::new(), |_| async move {
         Completion {
             generation: generation(),
@@ -192,7 +192,7 @@ async fn starting_records_attempt_deadline_and_order_for_both_scopes() {
 
 #[test]
 fn jitter_is_deterministic_and_bounded() {
-    let key = ("w1".into(), "status".into());
+    let key = Key::new("w1", "status");
     assert_eq!(jitter(&key, 1, 0), 0);
     for generation in 0..100 {
         let delay = jitter(&key, generation, 100);

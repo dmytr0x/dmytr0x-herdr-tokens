@@ -1,6 +1,7 @@
 //! Single coordinator: tasks do IO, only this module commits state transitions.
 mod background;
 mod job;
+mod planning;
 use crate::task::OwnedTask;
 use crate::{
     config::{Config, Snapshot},
@@ -12,7 +13,8 @@ use crate::{
 };
 use anyhow::Result;
 use background::BackgroundJob;
-use job::{Job, jitter};
+use job::{CollectorTask, jitter};
+use planning::{Candidate, ReloadPlan, WorkspaceDiff};
 use serde_json::{Value, json};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -21,6 +23,12 @@ use std::{
 use tokio::{sync::mpsc, time::Instant};
 use tokio_util::sync::CancellationToken;
 
+#[derive(Clone, Copy, serde::Serialize, PartialEq, Eq)]
+enum ConnectionState {
+    Connecting,
+    Connected,
+    Disconnected,
+}
 struct Workspace {
     directory: Directory,
     generation: u64,
@@ -36,13 +44,13 @@ struct Coordinator {
     config: Config,
     config_generation: u64,
     connection_generation: u64,
-    connection: &'static str,
+    connection: ConnectionState,
     discovery_error: Option<String>,
     rejected: Option<String>,
     rejected_generation: u64,
     workspaces: BTreeMap<String, Workspace>,
-    jobs: BTreeMap<Key, Job>,
-    global_jobs: BTreeMap<String, Job>,
+    jobs: BTreeMap<Key, CollectorTask>,
+    global_jobs: BTreeMap<String, CollectorTask>,
     background: BTreeMap<String, BackgroundJob>,
     publisher: Publisher,
     report_errors: BTreeMap<String, (String, u64)>,
@@ -54,14 +62,28 @@ struct Coordinator {
     started: Instant,
     order: u64,
     scan_due: Instant,
-    candidate: Option<(String, Instant)>,
-    observed_hash: String,
+    candidate: Candidate,
+}
+fn current(
+    workspaces: &BTreeMap<String, Workspace>,
+    jobs: &BTreeMap<Key, CollectorTask>,
+    globals: &BTreeMap<String, CollectorTask>,
+    current: Generation,
+    key: &Key,
+    candidate: Generation,
+) -> bool {
+    candidate.config == current.config
+        && candidate.connection == current.connection
+        && workspaces
+            .get(&key.workspace)
+            .is_some_and(|w| w.generation == candidate.directory)
+        && (jobs.contains_key(key) || globals.contains_key(&key.collector))
 }
 impl Coordinator {
     fn generation(&self, key: &Key) -> Generation {
         Generation {
             config: self.config_generation,
-            directory: self.workspaces[&key.0].generation,
+            directory: self.workspaces[&key.workspace].generation,
             connection: self.connection_generation,
         }
     }
@@ -73,35 +95,46 @@ impl Coordinator {
         }
     }
     fn current(&self, key: &Key, generation: Generation) -> bool {
-        generation.config == self.config_generation
-            && generation.connection == self.connection_generation
-            && self
-                .workspaces
-                .get(&key.0)
-                .is_some_and(|w| w.generation == generation.directory)
-            && (self.jobs.contains_key(key) || self.global_jobs.contains_key(&key.1))
+        current(
+            &self.workspaces,
+            &self.jobs,
+            &self.global_jobs,
+            self.global_generation(),
+            key,
+            generation,
+        )
     }
     fn refresh(&mut self, workspace: Option<&str>) {
-        for ((w, _), job) in &mut self.jobs {
-            if workspace.is_none_or(|wanted| wanted == w) {
+        for (key, job) in &mut self.jobs {
+            if workspace.is_none_or(|wanted| wanted == key.workspace) {
                 job.refresh();
             }
         }
         for job in self.global_jobs.values_mut() {
             job.refresh();
         }
-        if self.connection != "Connected" {
+        if self.connection != ConnectionState::Connected {
             self.discover_due = Instant::now();
         }
     }
-    async fn cancel_workspace_jobs(&mut self) {
-        for job in self.jobs.values() {
-            if let Some(cancel) = &job.task {
-                cancel.cancel();
+    async fn cancel_workspace_jobs(&mut self, affected: &BTreeSet<String>) {
+        for (key, job) in &self.jobs {
+            if affected.contains(&key.workspace)
+                && let Some(task) = &job.task
+            {
+                task.cancel();
             }
         }
-        for job in self.jobs.values_mut() {
-            if let Some(task) = job.task.take() {
+        let keys: Vec<_> = self
+            .jobs
+            .keys()
+            .filter(|key| affected.contains(&key.workspace))
+            .cloned()
+            .collect();
+        for key in keys {
+            if let Some(mut job) = self.jobs.remove(&key)
+                && let Some(task) = job.task.take()
+            {
                 let _ = task.join().await;
             }
         }
@@ -122,7 +155,7 @@ impl Coordinator {
     }
     async fn disconnect(&mut self) {
         self.connection_generation += 1;
-        self.connection = "Disconnected";
+        self.connection = ConnectionState::Disconnected;
         self.publisher.discard_values();
         self.cancel_jobs().await;
         let delay = self.backoff.min(30);
@@ -131,7 +164,7 @@ impl Coordinator {
             + Duration::from_millis(
                 delay * 1000
                     + jitter(
-                        &(self.identity.endpoint.clone(), "reconnect".into()),
+                        &Key::new(self.identity.endpoint.clone(), "reconnect"),
                         self.connection_generation,
                         delay * 100,
                     ),
@@ -152,7 +185,11 @@ impl Coordinator {
                 self.jobs
                     .get_mut(key)
                     .map(|job| &mut job.status)
-                    .or_else(|| self.global_jobs.get_mut(&key.1).map(|job| &mut job.status))
+                    .or_else(|| {
+                        self.global_jobs
+                            .get_mut(&key.collector)
+                            .map(|job| &mut job.status)
+                    })
             } else {
                 None
             };
@@ -197,14 +234,19 @@ impl Coordinator {
         Ok(())
     }
     async fn remove_workspace(&mut self, id: &str) {
-        for ((w, _), job) in &mut self.jobs {
-            if w == id
+        for (key, job) in &mut self.jobs {
+            if key.workspace == id
                 && let Some(c) = &job.task
             {
                 c.cancel();
             }
         }
-        let keys: Vec<_> = self.jobs.keys().filter(|(w, _)| w == id).cloned().collect();
+        let keys: Vec<_> = self
+            .jobs
+            .keys()
+            .filter(|key| key.workspace == id)
+            .cloned()
+            .collect();
         for key in keys {
             if let Some(mut job) = self.jobs.remove(&key)
                 && let Some(t) = job.task.take()
@@ -223,13 +265,13 @@ impl Coordinator {
                 continue;
             }
             for c in self.config.collectors.iter().filter(|c| !c.global()) {
-                let key = (id.clone(), c.name.clone());
+                let key = Key::new(id.clone(), c.name.clone());
+                if let Some(job) = old.remove(&key).filter(|job| job.collector == *c) {
+                    self.jobs.insert(key, job);
+                    continue;
+                }
                 self.order += 1;
-                let status = old
-                    .remove(&key)
-                    .filter(|j| j.collector == *c)
-                    .map(|j| j.status)
-                    .unwrap_or_default();
+                let status = JobStatus::default();
                 let due = Instant::now()
                     + Duration::from_millis(jitter(
                         &key,
@@ -237,7 +279,7 @@ impl Coordinator {
                         200.min(c.interval_ms / 10),
                     ));
                 self.jobs
-                    .insert(key, Job::new(c.clone(), due, self.order, status));
+                    .insert(key, CollectorTask::new(c.clone(), due, self.order, status));
             }
         }
         let mut old_global = std::mem::take(&mut self.global_jobs);
@@ -247,7 +289,7 @@ impl Coordinator {
                 continue;
             }
             self.order += 1;
-            let key = ("global".into(), c.name.clone());
+            let key = Key::new("global", c.name.clone());
             let due = Instant::now()
                 + Duration::from_millis(jitter(
                     &key,
@@ -256,7 +298,7 @@ impl Coordinator {
                 ));
             self.global_jobs.insert(
                 c.name.clone(),
-                Job::new(c.clone(), due, self.order, JobStatus::default()),
+                CollectorTask::new(c.clone(), due, self.order, JobStatus::default()),
             );
         }
     }
@@ -311,7 +353,7 @@ impl Coordinator {
             })
             .collect();
         for (name, cached, interval_ms, ttl_ms) in cached {
-            let key = (workspace.to_owned(), name);
+            let key = Key::new(workspace, name);
             self.publisher.put(Pending {
                 generation: self.generation(&key),
                 key,
@@ -323,64 +365,39 @@ impl Coordinator {
         }
     }
     async fn reconcile(&mut self, snapshot: Discovery) -> Result<()> {
-        let changed = snapshot.len() != self.workspaces.len()
-            || snapshot.iter().any(|(id, d)| {
-                self.workspaces
-                    .get(id)
-                    .is_none_or(|w| w.directory.canonical != d.canonical)
-            });
-        let reconnect = self.connection != "Connected";
-        if changed {
-            // Finish any metadata mutation before constructing clear barriers.
-            self.cancel_workspace_jobs().await;
+        let diff = WorkspaceDiff::between(&self.workspaces, &snapshot);
+        let reconnect = self.connection != ConnectionState::Connected;
+        let affected = diff.removed.union(&diff.changed).cloned().collect();
+        self.cancel_workspace_jobs(&affected).await;
+        if !diff.changed.is_empty() || !diff.removed.is_empty() {
             self.finish_report().await?;
-            let mut added = Vec::new();
-            let absent: Vec<_> = self
-                .workspaces
-                .keys()
-                .filter(|w| !snapshot.contains_key(*w))
-                .cloned()
-                .collect();
-            for id in absent {
-                self.remove_workspace(&id).await;
-            }
-            for (id, directory) in snapshot {
-                if let Some(old) = self.workspaces.get_mut(&id) {
-                    if old.directory.canonical != directory.canonical {
-                        self.publisher
-                            .clear(&id, self.config.workspace_token_names());
-                        old.generation += 1;
-                        for ((w, _), j) in &mut self.jobs {
-                            if *w == id {
-                                j.status = JobStatus::default();
-                            }
-                        }
-                    }
-                    old.directory = directory;
-                } else {
-                    added.push(id.clone());
-                    self.workspaces.insert(
-                        id,
-                        Workspace {
-                            directory,
-                            generation: 1,
-                        },
-                    );
+        }
+        for id in &diff.removed {
+            self.remove_workspace(id).await;
+        }
+        for (id, directory) in snapshot {
+            if let Some(old) = self.workspaces.get_mut(&id) {
+                if diff.changed.contains(&id) {
+                    self.publisher
+                        .clear(&id, self.config.workspace_token_names());
+                    old.generation += 1;
                 }
-            }
-            self.rebuild_jobs();
-            for id in added {
-                self.publish_global_cache(&id);
-            }
-        } else {
-            for (id, directory) in snapshot {
-                self.workspaces
-                    .get_mut(&id)
-                    .expect("known workspace")
-                    .directory = directory;
+                old.directory = directory;
+            } else {
+                self.workspaces.insert(
+                    id,
+                    Workspace {
+                        directory,
+                        generation: 1,
+                    },
+                );
             }
         }
-        self.connection = "Connected";
+        self.rebuild_jobs();
+        for id in diff.added.union(&diff.changed) {
+            self.publish_global_cache(id);
+        }
+        self.connection = ConnectionState::Connected;
         self.backoff = 1;
         self.discovery_error = None;
         if reconnect {
@@ -396,13 +413,12 @@ impl Coordinator {
             Snapshot::read(&self.identity.config)? == snapshot,
             "configuration changed during validation; retry"
         );
-        self.observed_hash = snapshot.hash();
-        self.candidate = None;
-        if config == self.config {
+        self.candidate.committed(snapshot.hash());
+        if ReloadPlan::between(&self.config, &config) == ReloadPlan::Unchanged {
             self.rejected = None;
             return Ok(false);
         }
-        if config.same_collection_config(&self.config) {
+        if ReloadPlan::between(&self.config, &config) == ReloadPlan::JobsOnly {
             // Collectors, generations and publications are untouched.
             self.config = config;
             self.rejected = None;
@@ -468,24 +484,12 @@ impl Coordinator {
             Ok(s) => s.hash(),
             Err(e) => format!("unreadable:{e}"),
         };
-        if fingerprint == self.observed_hash {
-            self.candidate = None;
-            return;
-        }
-        match &self.candidate {
-            Some((old, since))
-                if old == &fingerprint && since.elapsed() >= Duration::from_millis(200) =>
-            {
-                self.observed_hash = fingerprint;
-                self.candidate = None;
-                if let Err(e) = self.reload().await {
-                    self.reject(&e);
-                }
+        if self.candidate.ready(fingerprint, Instant::now()) {
+            if let Err(e) = self.reload().await {
+                self.reject(&e);
             }
-            _ => {
-                self.candidate = Some((fingerprint, Instant::now()));
-                self.scan_due = Instant::now() + Duration::from_millis(200);
-            }
+        } else if self.candidate.pending() {
+            self.scan_due = Instant::now() + Duration::from_millis(200);
         }
     }
     async fn tick(&mut self) -> Result<()> {
@@ -536,9 +540,9 @@ impl Coordinator {
             if let Some(collected) = job
                 .finish(
                     generation,
-                    self.connection == "Connected",
+                    self.connection == ConnectionState::Connected,
                     &self.identity.endpoint,
-                    Some(&key.0),
+                    Some(&key.workspace),
                 )
                 .await
             {
@@ -564,7 +568,7 @@ impl Coordinator {
             let publish = job
                 .finish(
                     generation,
-                    self.connection == "Connected",
+                    self.connection == ConnectionState::Connected,
                     &self.identity.endpoint,
                     None,
                 )
@@ -576,7 +580,7 @@ impl Coordinator {
             if let Some((cached, interval_ms, ttl_ms)) = publish {
                 let workspaces: Vec<_> = self.workspaces.keys().cloned().collect();
                 for workspace in workspaces {
-                    let key = (workspace, name.clone());
+                    let key = Key::new(workspace, name.clone());
                     self.publisher.put(Pending {
                         generation: self.generation(&key),
                         key,
@@ -588,7 +592,7 @@ impl Coordinator {
                 }
             }
         }
-        let connected = self.connection == "Connected";
+        let connected = self.connection == ConnectionState::Connected;
         for job in self.background.values_mut() {
             job.tick(connected, &self.workspaces, &self.identity.endpoint)
                 .await;
@@ -626,7 +630,7 @@ impl Coordinator {
             match due_job {
                 DueJob::Workspace(key) => {
                     let generation = self.generation(&key);
-                    let cwd = self.workspaces[&key.0]
+                    let cwd = self.workspaces[&key.workspace]
                         .directory
                         .canonical
                         .clone()
@@ -634,7 +638,7 @@ impl Coordinator {
                     let job = self.jobs.get_mut(&key).expect("job");
                     self.order += 1;
                     job.start(
-                        Some(key.0),
+                        Some(key.workspace),
                         cwd,
                         generation,
                         self.order,
@@ -654,19 +658,19 @@ impl Coordinator {
         Ok(())
     }
     fn dispatch_report(&mut self) -> Result<()> {
-        if self.report.is_some() || self.connection != "Connected" {
+        if self.report.is_some() || self.connection != ConnectionState::Connected {
             return Ok(());
         }
-        let config_generation = self.config_generation;
-        let connection_generation = self.connection_generation;
-        let (send, stale) = self.publisher.next(|key, generation| {
-            (self.jobs.contains_key(key) || self.global_jobs.contains_key(&key.1))
-                && generation.config == config_generation
-                && generation.connection == connection_generation
-                && self
-                    .workspaces
-                    .get(&key.0)
-                    .is_some_and(|workspace| workspace.generation == generation.directory)
+        let generation = self.global_generation();
+        let (send, stale) = self.publisher.next(|key, candidate| {
+            current(
+                &self.workspaces,
+                &self.jobs,
+                &self.global_jobs,
+                generation,
+                key,
+                candidate,
+            )
         });
         let mut stale_global = BTreeSet::new();
         for key in stale {
@@ -676,7 +680,7 @@ impl Coordinator {
                     job.due = Instant::now();
                 }
             } else {
-                stale_global.insert(key.1);
+                stale_global.insert(key.collector);
             }
         }
         for name in stale_global {
@@ -709,7 +713,7 @@ impl Coordinator {
     fn status(&self, values: bool) -> Value {
         let workspaces: BTreeMap<_,_> = self.workspaces.iter().map(|(id,w)| (id, json!({"directory": w.directory, "generation": w.generation, "pending_clears": self.publisher.pending_clears(id), "publication_error": self.report_errors.get(id)}))).collect();
         let mut jobs: Vec<_> = self.jobs.iter().map(|(key,j)| json!({
-            "workspace": key.0, "global": false, "collector": key.1, "tokens": j.collector.tokens.keys().collect::<Vec<_>>(),
+            "workspace": key.workspace, "global": false, "collector": key.collector, "tokens": j.collector.tokens.keys().collect::<Vec<_>>(),
             "running": j.task.is_some(), "queued": j.due <= Instant::now(), "refresh_pending": j.refresh,
             "publication_pending": self.publisher.has_pending(key),
             "next_due_in_ms": j.due.saturating_duration_since(Instant::now()).as_millis() as u64,
@@ -718,7 +722,7 @@ impl Coordinator {
         jobs.extend(self.global_jobs.iter().map(|(name, job)| {
             let publication_pending = self.workspaces.keys().any(|workspace| {
                 self.publisher
-                    .has_pending(&(workspace.clone(), name.clone()))
+                    .has_pending(&Key::new(workspace.clone(), name.clone()))
             });
             json!({
                 "workspace": Value::Null, "global": true, "collector": name,
@@ -730,7 +734,7 @@ impl Coordinator {
             })
         }));
         json!({"version": env!("CARGO_PKG_VERSION"), "endpoint": self.identity.endpoint, "source": "herdr-tokens", "uptime_ms": self.started.elapsed().as_millis() as u64,
-            "config_hash": self.config.hash(), "config_files_hash": self.observed_hash, "config_generation": self.config_generation,
+            "config_hash": self.config.hash(), "config_files_hash": self.candidate.observed, "config_generation": self.config_generation,
             "rejected_candidates": self.rejected_generation, "last_rejected_error": self.rejected, "connection": self.connection,
             "connection_generation": self.connection_generation, "discovery_error": self.discovery_error, "workspaces": workspaces, "jobs": jobs,
             "background_jobs": self.background.values().map(BackgroundJob::json).collect::<Vec<_>>(),
@@ -814,7 +818,7 @@ impl Coordinator {
         for id in self.workspaces.keys() {
             self.publisher.clear(id, self.config.token_names());
         }
-        while self.connection == "Connected"
+        while self.connection == ConnectionState::Connected
             && self.publisher.has_clears()
             && Instant::now() + crate::process::DELIVERY_BOUND < deadline
         {
@@ -877,7 +881,7 @@ pub async fn run(
         config,
         config_generation: 1,
         connection_generation: 1,
-        connection: "Connecting",
+        connection: ConnectionState::Connecting,
         discovery_error: None,
         rejected: None,
         rejected_generation: 0,
@@ -895,8 +899,7 @@ pub async fn run(
         started: now,
         order: 0,
         scan_due: now + Duration::from_secs(1),
-        candidate: None,
-        observed_hash: snapshot.hash(),
+        candidate: Candidate::new(snapshot.hash()),
     };
     c.rebuild_background().await;
     tracing::info!(endpoint = %endpoint.hash, generation = 1, "runner ready");

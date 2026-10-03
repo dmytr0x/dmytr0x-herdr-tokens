@@ -12,7 +12,7 @@ use std::{path::PathBuf, time::Duration};
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
-pub(super) struct Job {
+pub(super) struct CollectorTask {
     pub collector: Collector,
     pub due: Instant,
     pub order: u64,
@@ -39,11 +39,11 @@ pub(super) fn jitter(key: &Key, generation: u64, ceiling: u64) -> u64 {
     if ceiling == 0 {
         return 0;
     }
-    let digest = hash(format!("{}\0{}\0{generation}", key.0, key.1).as_bytes());
+    let digest = hash(format!("{}\0{}\0{generation}", key.workspace, key.collector).as_bytes());
     u64::from_str_radix(&digest[..16], 16).expect("hex hash") % (ceiling + 1)
 }
 
-impl Job {
+impl CollectorTask {
     pub fn new(collector: Collector, due: Instant, order: u64, status: JobStatus) -> Self {
         Self {
             collector,
@@ -83,7 +83,7 @@ impl Job {
                 tracing::warn!(endpoint, workspace = ?workspace, collector = %collector.name, "collection deadline missed; endpoint overloaded");
             }
         }
-        let key = (
+        let key = Key::new(
             workspace.clone().unwrap_or_else(|| "global".into()),
             collector.name.clone(),
         );

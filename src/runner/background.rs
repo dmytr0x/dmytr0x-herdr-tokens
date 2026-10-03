@@ -141,7 +141,7 @@ impl BackgroundJob {
         let ceiling = (job.interval_ms / 10).min(30_000);
         let due = Instant::now()
             + Duration::from_millis(jitter(
-                &("background".into(), job.name.clone()),
+                &crate::publisher::Key::new("background", job.name.clone()),
                 order,
                 ceiling,
             ));
