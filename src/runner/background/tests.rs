@@ -37,14 +37,16 @@ fn repo(root: &Path) -> (PathBuf, PathBuf) {
 fn job(command: &str, worktrees: Worktrees, chunk_size: usize) -> Job {
     Job {
         name: "fetch".into(),
-        command: vec!["/bin/sh".into(), "-c".into(), command.into()],
+        spec: crate::config::CommandSpec {
+            argv: vec!["/bin/sh".into(), "-c".into(), command.into()],
+            env: BTreeMap::new(),
+            env_allow: vec![],
+        },
         worktrees,
         interval_ms: 60_000,
         timeout_ms: 5_000,
         chunk_size,
         chunk_delay_ms: 0,
-        env: BTreeMap::new(),
-        env_allow: vec![],
     }
 }
 

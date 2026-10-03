@@ -3,7 +3,7 @@ mod git;
 #[cfg(test)]
 mod tests;
 use crate::{
-    config::{Collector, CommandOutput, Config, Job, Provider, TokenMapping},
+    config::{Collector, CollectorKind, CommandOutput, Config, Job, TokenMapping},
     process::{self, Request},
 };
 use serde::Serialize;
@@ -233,7 +233,7 @@ pub async fn run_job(
     workspace_ids: &[String],
     cancel: CancellationToken,
 ) -> JobOutcome {
-    let mut env = command_env(&job.env_allow, &job.env);
+    let mut env = command_env(&job.spec.env_allow, &job.spec.env);
     env.insert("HERDR_TOKENS_JOB".into(), job.name.clone().into());
     env.insert("HERDR_TOKENS_WORKTREE_DIR".into(), dir.as_os_str().into());
     env.insert(
@@ -243,7 +243,7 @@ pub async fn run_job(
     let started = Instant::now();
     let result = process::execute(
         Request {
-            argv: job.command.iter().map(Into::into).collect(),
+            argv: job.spec.argv.iter().map(Into::into).collect(),
             cwd: dir.into(),
             env,
             timeout: Duration::from_millis(job.timeout_ms),
@@ -279,7 +279,7 @@ pub async fn preflight(config: &Config) -> anyhow::Result<()> {
         && !config
             .collectors
             .iter()
-            .any(|c| c.provider == Provider::Git)
+            .any(|c| matches!(c.kind, CollectorKind::Git))
     {
         return Ok(());
     }
@@ -336,17 +336,17 @@ async fn collect_with_context(
     cwd: &Path,
     cancel: CancellationToken,
 ) -> Result<Collected, Error> {
-    let (env, argv) = match c.provider {
-        Provider::Command => {
-            let mut env = command_env(&c.env_allow, &c.env);
+    let (env, argv) = match &c.kind {
+        CollectorKind::Command { spec, .. } => {
+            let mut env = command_env(&spec.env_allow, &spec.env);
             if let Some(workspace) = workspace {
                 env.insert("HERDR_TOKENS_WORKSPACE_ID".into(), workspace.into());
                 env.insert("HERDR_TOKENS_WORKSPACE_DIR".into(), cwd.as_os_str().into());
             }
             env.insert("HERDR_TOKENS_COLLECTOR".into(), c.name.clone().into());
-            (env, c.command.iter().map(Into::into).collect())
+            (env, spec.argv.iter().map(Into::into).collect())
         }
-        Provider::Git => (
+        CollectorKind::Git => (
             git_env(),
             GIT.into_iter()
                 .chain([
@@ -366,7 +366,7 @@ async fn collect_with_context(
             cwd: cwd.into(),
             env,
             timeout: Duration::from_millis(c.timeout_ms),
-            stdout_limit: if c.provider == Provider::Git {
+            stdout_limit: if matches!(c.kind, CollectorKind::Git) {
                 1_048_576
             } else {
                 65536
@@ -379,7 +379,9 @@ async fn collect_with_context(
     .await?;
     if !out.status.success() {
         // `LC_ALL=C` keeps this message stable; unsafe or broken checkouts still fail.
-        if c.provider == Provider::Git && out.stderr.starts_with(b"fatal: not a git repository") {
+        if matches!(c.kind, CollectorKind::Git)
+            && out.stderr.starts_with(b"fatal: not a git repository")
+        {
             return Ok(Collected {
                 patch: c.tokens.keys().map(|t| (t.clone(), Token::Clear)).collect(),
                 truncated: false,
@@ -390,17 +392,20 @@ async fn collect_with_context(
             stderr_bytes: out.stderr.len(),
         });
     }
-    let (patch, truncated) = match c.provider {
-        Provider::Command => match c.output {
+    let (patch, truncated) = match &c.kind {
+        CollectorKind::Command { output, .. } => match output {
             CommandOutput::Json => command::parse_json(&out.stdout, &c.tokens)?,
             CommandOutput::Text => command::parse_text(&out.stdout, &c.tokens)?,
         },
-        Provider::Git => {
+        CollectorKind::Git => {
             let fields = git::parse(&out.stdout)?;
             let mut patch = Patch::new();
             let mut truncated = false;
             for (token, mapping) in &c.tokens {
-                let (value, clipped) = render(&fields[&mapping.field], mapping);
+                let (value, clipped) = render(
+                    fields.get(&mapping.field).ok_or(Error::InvalidOutput)?,
+                    mapping,
+                );
                 patch.insert(token.clone(), value);
                 truncated |= clipped;
             }

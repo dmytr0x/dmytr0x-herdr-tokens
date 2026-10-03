@@ -222,7 +222,7 @@ impl Coordinator {
             if w.directory.canonical.is_none() {
                 continue;
             }
-            for c in self.config.collectors.iter().filter(|c| !c.global) {
+            for c in self.config.collectors.iter().filter(|c| !c.global()) {
                 let key = (id.clone(), c.name.clone());
                 self.order += 1;
                 let status = old
@@ -241,7 +241,7 @@ impl Coordinator {
             }
         }
         let mut old_global = std::mem::take(&mut self.global_jobs);
-        for c in self.config.collectors.iter().filter(|c| c.global) {
+        for c in self.config.collectors.iter().filter(|c| c.global()) {
             if let Some(job) = old_global.remove(&c.name).filter(|job| job.collector == *c) {
                 self.global_jobs.insert(c.name.clone(), job);
                 continue;
@@ -402,7 +402,7 @@ impl Coordinator {
             self.rejected = None;
             return Ok(false);
         }
-        if config.without_jobs() == self.config.without_jobs() {
+        if config.same_collection_config(&self.config) {
             // Collectors, generations and publications are untouched.
             self.config = config;
             self.rejected = None;

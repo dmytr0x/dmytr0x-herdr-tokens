@@ -75,7 +75,7 @@ pub async fn execute(cli: Cli) -> Result<()> {
         let config = required(cli.config_dir, "--config-dir / HERDR_PLUGIN_CONFIG_DIR")?;
         let c = config::Config::load(&config).map_err(invalid)?;
         println!(
-            "Valid: {} collectors, {} tokens ({})",
+            "Valid configuration (syntax/schema only; runtime preflight not run): {} collectors, {} tokens ({})",
             c.collectors.len(),
             c.token_names().len(),
             c.hash()

@@ -11,12 +11,12 @@ fn defaults_empty_fragments_and_semantic_hash() {
     let (_t, p) = directory();
     assert!(Config::load(&p).is_err());
     fs::write(p.join("tokens.toml"), "schema_version=1\n").unwrap();
-    assert!(Config::load(&p).unwrap().collectors.is_empty());
+    assert!(Config::load(&p).unwrap().collectors().is_empty());
     fs::create_dir(p.join("tokens.d")).unwrap();
     fs::write(p.join("tokens.d/b.toml"), COLLECTOR).unwrap();
     let c = Config::load(&p).unwrap();
-    assert_eq!(c.collectors[0].ttl_ms, 30000);
-    assert_eq!(c.collectors[0].timeout_ms, 1000);
+    assert_eq!(c.collectors()[0].ttl_ms(), 30000);
+    assert_eq!(c.collectors()[0].timeout_ms(), 1000);
     let before = Snapshot::read(&p).unwrap();
     fs::write(
         p.join("tokens.toml"),
@@ -142,7 +142,7 @@ fn zero_visibility_defaults_alias_and_hash() {
     let text = format!("schema_version=1\n{COLLECTOR}");
     fs::write(p.join("tokens.toml"), &text).unwrap();
     let default = Config::load(&p).unwrap();
-    assert!(default.collectors[0].tokens["ci"].show_zero);
+    assert!(default.collectors()[0].tokens()["ci"].show_zero);
     for flag in ["show_zero", "show_always"] {
         for enabled in [true, false] {
             fs::write(
@@ -154,7 +154,7 @@ fn zero_visibility_defaults_alias_and_hash() {
             )
             .unwrap();
             let config = Config::load(&p).unwrap();
-            assert_eq!(config.collectors[0].tokens["ci"].show_zero, enabled);
+            assert_eq!(config.collectors()[0].tokens()["ci"].show_zero, enabled);
             assert_eq!(default.hash() == config.hash(), enabled);
         }
     }
@@ -178,7 +178,7 @@ fn decorated_mappings_are_strict_and_normalized() {
     )
     .unwrap();
     let decorated = Config::load(&p).unwrap();
-    assert_eq!(decorated.collectors[0].tokens["ci"].prefix, "[!");
+    assert_eq!(decorated.collectors()[0].tokens()["ci"].prefix, "[!");
     assert_ne!(decorated, shorthand);
     for value in [
         "{prefix='!'}",
@@ -225,7 +225,7 @@ fn command_text_output_accepts_stdout_mapping() {
     .unwrap();
 
     let config = Config::load(&p).unwrap();
-    assert_eq!(config.collectors[0].output, CommandOutput::Text);
+    assert_eq!(config.collectors()[0].output(), Some(&CommandOutput::Text));
 }
 
 #[test]
@@ -238,7 +238,7 @@ fn global_command_collector_is_accepted() {
     .unwrap();
 
     let config = Config::load(&p).unwrap();
-    assert!(config.collectors[0].global);
+    assert!(config.collectors()[0].global());
 }
 
 #[test]
@@ -275,14 +275,14 @@ const JOB: &str = "[[jobs]]\nname='fetch'\ncommand=['git','fetch']\n";
 fn job_defaults_and_bounds() {
     let (_t, p) = directory();
     fs::write(p.join("tokens.toml"), format!("schema_version=1\n{JOB}")).unwrap();
-    let job = Config::load(&p).unwrap().jobs.remove(0);
+    let job = Config::load(&p).unwrap().jobs()[0].clone();
     assert_eq!(
         (
-            job.worktrees,
-            job.interval_ms,
-            job.timeout_ms,
-            job.chunk_size,
-            job.chunk_delay_ms
+            job.worktrees(),
+            job.interval_ms(),
+            job.timeout_ms(),
+            job.chunk_size(),
+            job.chunk_delay_ms()
         ),
         (Worktrees::Main, 300_000, 60_000, 4, 0)
     );
@@ -294,13 +294,13 @@ fn job_defaults_and_bounds() {
         .unwrap();
         Config::load(&p)
     };
-    let job = set("interval_ms=10000").unwrap().jobs.remove(0);
-    assert_eq!(job.timeout_ms, 10_000);
+    let job = set("interval_ms=10000").unwrap().jobs()[0].clone();
+    assert_eq!(job.timeout_ms(), 10_000);
     let job = set("worktrees='all'\ninterval_ms=86400000\ntimeout_ms=600000\nchunk_size=16\nchunk_delay_ms=86400000")
         .unwrap()
-        .jobs
-        .remove(0);
-    assert_eq!(job.worktrees, Worktrees::All);
+        .jobs()
+        [0].clone();
+    assert_eq!(job.worktrees(), Worktrees::All);
     for (extra, valid) in [
         ("interval_ms=9999", false),
         ("interval_ms=86400001", false),
@@ -357,8 +357,34 @@ fn job_names_commands_limits_and_fragments() {
     fs::write(p.join("tokens.d/b.toml"), JOB.replace("'fetch'", "'b'")).unwrap();
     fs::write(p.join("tokens.d/a.toml"), JOB.replace("'fetch'", "'a'")).unwrap();
     let config = Config::load(&p).unwrap();
-    let names: Vec<_> = config.jobs.iter().map(|j| j.name.as_str()).collect();
+    let names: Vec<_> = config.jobs().iter().map(|j| j.name()).collect();
     assert_eq!(names, ["a", "b"]);
-    assert_eq!(config.without_jobs().collectors, config.collectors);
-    assert!(config.without_jobs().jobs.is_empty());
+    assert!(config.same_collection_config(&config));
+}
+
+#[test]
+fn fragment_errors_identify_source_entry_field_and_span_without_values() {
+    let (_t, p) = directory();
+    fs::write(p.join("tokens.toml"), "schema_version=1").unwrap();
+    fs::create_dir(p.join("tokens.d")).unwrap();
+    fs::write(
+        p.join("tokens.d/a.toml"),
+        COLLECTOR.replace(
+            "command=['echo','{}']",
+            "command=['SECRET_ARGUMENT']\nenv={KEY='SECRET_VALUE'}\ninterval_ms=1",
+        ),
+    )
+    .unwrap();
+    let error = Config::load(&p).unwrap_err().to_string();
+    assert!(error.contains("fragment 1 collectors[0] bytes"), "{error}");
+    assert!(error.contains("interval_ms"));
+    assert!(!error.contains("SECRET"));
+    fs::write(
+        p.join("tokens.d/a.toml"),
+        "secret='SECRET_VALUE'\nunknown=[",
+    )
+    .unwrap();
+    let error = Config::load(&p).unwrap_err().to_string();
+    assert!(error.contains("fragment 1: invalid TOML/schema at byte"));
+    assert!(!error.contains("SECRET"));
 }

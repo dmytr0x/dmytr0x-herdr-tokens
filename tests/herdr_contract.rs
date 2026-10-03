@@ -1,16 +1,8 @@
-use herdr_tokens::{
-    config::{Config, Runtime},
-    herdr,
-};
+use herdr_tokens::{config::Config, herdr};
 use serde_json::json;
-use std::{collections::BTreeMap, fs};
+use std::fs;
 fn config() -> Config {
-    Config {
-        runtime: Runtime::default(),
-        workspace_dirs: BTreeMap::new(),
-        collectors: vec![],
-        jobs: vec![],
-    }
+    Config::from_toml("schema_version=1").unwrap()
 }
 #[test]
 fn captured_empty_list_envelopes() {
@@ -55,10 +47,16 @@ fn directory_priority_ambiguity_relative_and_partial_snapshots() {
             .is_none()
     );
     assert!(decode(&w, "{}", &config()).is_err());
-    let mut c = config();
-    c.workspace_dirs.insert("w1".into(), a.clone());
+    let override_config = |path: &std::path::Path| {
+        Config::from_toml(&format!(
+            "schema_version=1\n[workspace_dirs]\nw1={}",
+            toml::Value::String(path.display().to_string())
+        ))
+        .unwrap()
+    };
+    let c = override_config(&a);
     assert_eq!(decode(&w, &two, &c).unwrap()["w1"].canonical, Some(a));
-    c.workspace_dirs.insert("w1".into(), root.join("offline"));
+    let c = override_config(&root.join("offline"));
     assert!(decode(&w, &one, &c).unwrap()["w1"].canonical.is_none());
     let wt = json!({"id":"test","result":{"workspaces":[{"workspace_id":"w1","worktree":{"checkout_path":b}}]}});
     assert_eq!(

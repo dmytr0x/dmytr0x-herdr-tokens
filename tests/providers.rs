@@ -1,26 +1,50 @@
 use herdr_tokens::{
-    config::{Collector, CommandOutput, Provider},
+    config::{CommandOutput, Config, Provider, TokenMapping},
     providers::{self, Token},
 };
 use std::{collections::BTreeMap, fs, path::Path, process::Command};
 use tokio_util::sync::CancellationToken;
+// Mutable wire fixture; each invocation crosses the real validation boundary.
+#[derive(serde::Serialize)]
+struct Collector {
+    name: String,
+    provider: Provider,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    command: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    output: Option<CommandOutput>,
+    interval_ms: u64,
+    timeout_ms: u64,
+    ttl_ms: u64,
+    tokens: BTreeMap<String, TokenMapping>,
+}
+async fn collect(
+    c: &Collector,
+    workspace: &str,
+    cwd: &Path,
+    cancel: CancellationToken,
+) -> Result<providers::Collected, providers::Error> {
+    let text = format!(
+        "schema_version=1\n[[collectors]]\n{}",
+        toml::to_string(c).unwrap()
+    );
+    let config = Config::from_toml(&text).unwrap();
+    providers::collect(&config.collectors()[0], workspace, cwd, cancel).await
+}
 fn collector(script: String) -> Collector {
     Collector {
         name: "test".into(),
         provider: Provider::Command,
         command: vec!["/bin/sh".into(), "-c".into(), script],
-        global: false,
-        output: CommandOutput::Json,
+        output: Some(CommandOutput::Json),
         interval_ms: 1000,
         timeout_ms: 1000,
         ttl_ms: 3000,
-        env: BTreeMap::new(),
-        env_allow: vec![],
         tokens: BTreeMap::from([("token".into(), "status".into())]),
     }
 }
 async fn command(output: &str) -> Result<providers::Collected, providers::Error> {
-    providers::collect(
+    collect(
         &collector(format!("printf '%s' '{}'", output.replace('\'', "'\"'\"'"))),
         "w1",
         Path::new("/"),
@@ -32,10 +56,10 @@ async fn command(output: &str) -> Result<providers::Collected, providers::Error>
 async fn command_text_output_publishes_date_stdout() {
     let mut c = collector(String::new());
     c.command = vec!["date".into(), "+date-marker".into()];
-    c.output = CommandOutput::Text;
+    c.output = Some(CommandOutput::Text);
     c.tokens = BTreeMap::from([("current_date".into(), "stdout".into())]);
 
-    let out = providers::collect(&c, "w1", Path::new("/"), CancellationToken::new())
+    let out = collect(&c, "w1", Path::new("/"), CancellationToken::new())
         .await
         .unwrap();
 
@@ -46,10 +70,10 @@ async fn command_text_output_publishes_date_stdout() {
 #[tokio::test]
 async fn command_text_output_strips_ansi_sequences() {
     let mut c = collector("printf '\\033[31mred\\033[0m\\n'".into());
-    c.output = CommandOutput::Text;
+    c.output = Some(CommandOutput::Text);
     c.tokens = BTreeMap::from([("color".into(), "stdout".into())]);
 
-    let out = providers::collect(&c, "w1", Path::new("/"), CancellationToken::new())
+    let out = collect(&c, "w1", Path::new("/"), CancellationToken::new())
         .await
         .unwrap();
 
@@ -70,7 +94,7 @@ async fn decorated_command_values_preserve_clears_and_unicode_limits() {
         let mapping = c.tokens.get_mut("token").unwrap();
         mapping.prefix = "[!".into();
         mapping.suffix = "]".into();
-        let out = providers::collect(&c, "w1", Path::new("/"), CancellationToken::new())
+        let out = collect(&c, "w1", Path::new("/"), CancellationToken::new())
             .await
             .unwrap();
         assert_eq!(out.patch["token"], expected);
@@ -83,7 +107,7 @@ async fn decorated_command_values_preserve_clears_and_unicode_limits() {
     let mapping = c.tokens.get_mut("token").unwrap();
     mapping.prefix = "✓".into();
     mapping.suffix = "!".into();
-    let out = providers::collect(&c, "w1", Path::new("/"), CancellationToken::new())
+    let out = collect(&c, "w1", Path::new("/"), CancellationToken::new())
         .await
         .unwrap();
     assert_eq!(
@@ -98,7 +122,7 @@ async fn decorated_command_values_preserve_clears_and_unicode_limits() {
         "printf '{\"status\":0}'".into(),
     ];
     c.tokens.insert("plain".into(), "status".into());
-    let out = providers::collect(&c, "w1", Path::new("/"), CancellationToken::new())
+    let out = collect(&c, "w1", Path::new("/"), CancellationToken::new())
         .await
         .unwrap();
     assert_eq!(out.patch["plain"], Token::Set("0".into()));
@@ -125,7 +149,7 @@ async fn hidden_command_values_clear_the_entire_decoration() {
         mapping.prefix = "[!".into();
         mapping.suffix = "]".into();
         mapping.show_zero = false;
-        let out = providers::collect(&c, "w1", Path::new("/"), CancellationToken::new())
+        let out = collect(&c, "w1", Path::new("/"), CancellationToken::new())
             .await
             .unwrap();
         assert_eq!(out.patch["token"], expected, "{value}");
@@ -140,13 +164,13 @@ async fn decorated_git_counts_include_zero() {
     let mapping = c.tokens.get_mut("staged_files").unwrap();
     mapping.prefix = "✓".into();
     mapping.suffix = " staged".into();
-    let out = providers::collect(&c, "w1", t.path(), CancellationToken::new())
+    let out = collect(&c, "w1", t.path(), CancellationToken::new())
         .await
         .unwrap();
     assert_eq!(out.patch["staged_files"], Token::Set("✓0 staged".into()));
     assert_eq!(out.patch["modified_files"], Token::Set("0".into()));
     c.tokens.get_mut("staged_files").unwrap().show_zero = false;
-    let out = providers::collect(&c, "w1", t.path(), CancellationToken::new())
+    let out = collect(&c, "w1", t.path(), CancellationToken::new())
         .await
         .unwrap();
     assert_eq!(out.patch["staged_files"], Token::Clear);
@@ -184,14 +208,14 @@ async fn strict_json_and_atomic_mapping() {
     assert!(out.truncated);
     let c = collector("printf '{\"status\":1}'; exit 1".into());
     assert!(
-        providers::collect(&c, "w1", Path::new("/"), CancellationToken::new())
+        collect(&c, "w1", Path::new("/"), CancellationToken::new())
             .await
             .is_err()
     );
     let mut c = collector("printf '{\"status\":1}'".into());
     c.tokens.insert("missing".into(), "missing".into());
     assert!(
-        providers::collect(&c, "w1", Path::new("/"), CancellationToken::new())
+        collect(&c, "w1", Path::new("/"), CancellationToken::new())
             .await
             .is_err()
     );
@@ -218,6 +242,8 @@ fn git(dir: &Path, args: &[&str]) {
 fn git_collector() -> Collector {
     let mut c = collector(String::new());
     c.provider = Provider::Git;
+    c.command.clear();
+    c.output = None;
     c.tokens = [
         "modified_files",
         "staged_files",
@@ -230,7 +256,7 @@ fn git_collector() -> Collector {
     c
 }
 async fn counts(p: &Path) -> BTreeMap<String, Token> {
-    providers::collect(&git_collector(), "w1", p, CancellationToken::new())
+    collect(&git_collector(), "w1", p, CancellationToken::new())
         .await
         .unwrap()
         .patch
@@ -308,7 +334,7 @@ async fn real_git_status_rename_weird_names_worktrees_and_conflicts() {
     let bare = tempfile::tempdir().unwrap();
     git(bare.path(), &["init", "-q", "--bare"]);
     assert!(
-        providers::collect(
+        collect(
             &git_collector(),
             "w1",
             bare.path(),

@@ -1,6 +1,6 @@
 use super::*;
 use crate::{
-    config::{CommandOutput, Provider},
+    config::{CollectorKind, CommandOutput, CommandScope, CommandSpec},
     providers::Token,
 };
 use std::collections::BTreeMap;
@@ -9,15 +9,18 @@ fn job() -> Job {
     Job::new(
         Collector {
             name: "status".into(),
-            provider: Provider::Command,
-            command: vec!["printf".into(), "ready".into()],
-            global: false,
-            output: CommandOutput::Text,
+            kind: CollectorKind::Command {
+                spec: CommandSpec {
+                    argv: vec!["printf".into(), "ready".into()],
+                    env: BTreeMap::new(),
+                    env_allow: vec![],
+                },
+                scope: CommandScope::Workspace,
+                output: CommandOutput::Text,
+            },
             interval_ms: 1000,
             timeout_ms: 500,
             ttl_ms: 3000,
-            env: BTreeMap::new(),
-            env_allow: vec![],
             tokens: BTreeMap::from([("status".into(), "stdout".into())]),
         },
         Instant::now() + Duration::from_secs(1),

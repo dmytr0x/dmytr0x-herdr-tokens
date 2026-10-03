@@ -126,18 +126,65 @@ struct RawCollector {
     tokens: BTreeMap<String, TokenMapping>,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-pub struct Collector {
-    pub name: String,
-    pub provider: Provider,
-    pub command: Vec<String>,
-    pub global: bool,
-    pub output: CommandOutput,
-    pub interval_ms: u64,
-    pub timeout_ms: u64,
-    pub ttl_ms: u64,
+pub(crate) struct CommandSpec {
+    pub argv: Vec<String>,
     pub env: BTreeMap<String, String>,
     pub env_allow: Vec<String>,
-    pub tokens: BTreeMap<String, TokenMapping>,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub(crate) enum CommandScope {
+    Workspace,
+    Global,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub(crate) enum CollectorKind {
+    Git,
+    Command {
+        spec: CommandSpec,
+        scope: CommandScope,
+        output: CommandOutput,
+    },
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct Collector {
+    pub(crate) name: String,
+    pub(crate) kind: CollectorKind,
+    pub(crate) interval_ms: u64,
+    pub(crate) timeout_ms: u64,
+    pub(crate) ttl_ms: u64,
+    pub(crate) tokens: BTreeMap<String, TokenMapping>,
+}
+impl Collector {
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+    pub fn interval_ms(&self) -> u64 {
+        self.interval_ms
+    }
+    pub fn timeout_ms(&self) -> u64 {
+        self.timeout_ms
+    }
+    pub fn ttl_ms(&self) -> u64 {
+        self.ttl_ms
+    }
+    pub fn tokens(&self) -> &BTreeMap<String, TokenMapping> {
+        &self.tokens
+    }
+    pub fn global(&self) -> bool {
+        matches!(
+            self.kind,
+            CollectorKind::Command {
+                scope: CommandScope::Global,
+                ..
+            }
+        )
+    }
+    pub fn output(&self) -> Option<&CommandOutput> {
+        match &self.kind {
+            CollectorKind::Git => None,
+            CollectorKind::Command { output, .. } => Some(output),
+        }
+    }
 }
 /// Which worktrees of a repository a background job runs in.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -168,15 +215,33 @@ struct RawJob {
 /// A periodic command run in the repositories of discovered workspaces. Publishes no tokens.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct Job {
-    pub name: String,
-    pub command: Vec<String>,
-    pub worktrees: Worktrees,
-    pub interval_ms: u64,
-    pub timeout_ms: u64,
-    pub chunk_size: usize,
-    pub chunk_delay_ms: u64,
-    pub env: BTreeMap<String, String>,
-    pub env_allow: Vec<String>,
+    pub(crate) name: String,
+    pub(crate) spec: CommandSpec,
+    pub(crate) worktrees: Worktrees,
+    pub(crate) interval_ms: u64,
+    pub(crate) timeout_ms: u64,
+    pub(crate) chunk_size: usize,
+    pub(crate) chunk_delay_ms: u64,
+}
+impl Job {
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+    pub fn worktrees(&self) -> Worktrees {
+        self.worktrees
+    }
+    pub fn interval_ms(&self) -> u64 {
+        self.interval_ms
+    }
+    pub fn timeout_ms(&self) -> u64 {
+        self.timeout_ms
+    }
+    pub fn chunk_size(&self) -> usize {
+        self.chunk_size
+    }
+    pub fn chunk_delay_ms(&self) -> u64 {
+        self.chunk_delay_ms
+    }
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -187,24 +252,24 @@ struct Main {
     #[serde(default)]
     workspace_dirs: BTreeMap<String, PathBuf>,
     #[serde(default)]
-    collectors: Vec<RawCollector>,
+    collectors: Vec<toml::Spanned<RawCollector>>,
     #[serde(default)]
-    jobs: Vec<RawJob>,
+    jobs: Vec<toml::Spanned<RawJob>>,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Fragment {
     #[serde(default)]
-    collectors: Vec<RawCollector>,
+    collectors: Vec<toml::Spanned<RawCollector>>,
     #[serde(default)]
-    jobs: Vec<RawJob>,
+    jobs: Vec<toml::Spanned<RawJob>>,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct Config {
-    pub runtime: Runtime,
-    pub workspace_dirs: BTreeMap<String, PathBuf>,
-    pub collectors: Vec<Collector>,
-    pub jobs: Vec<Job>,
+    pub(crate) runtime: Runtime,
+    pub(crate) workspace_dirs: BTreeMap<String, PathBuf>,
+    pub(crate) collectors: Vec<Collector>,
+    pub(crate) jobs: Vec<Job>,
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Snapshot {
@@ -299,7 +364,8 @@ impl Snapshot {
                 )
             })
         }
-        let mut main: Main = parse(&self.files[0].1)?;
+        let mut main: Main =
+            parse(&self.files[0].1).map_err(|e| anyhow::anyhow!("main file: {e}"))?;
         ensure!(main.schema_version == 1, "unsupported schema_version");
         ensure!(
             (1..=64).contains(&main.runtime.max_concurrency),
@@ -309,10 +375,34 @@ impl Snapshot {
             (1000..=60000).contains(&main.runtime.discovery_interval_ms),
             "discovery interval outside 1000..60000"
         );
-        for (_, bytes) in self.files.iter().skip(1) {
-            let fragment = parse::<Fragment>(bytes)?;
-            main.collectors.extend(fragment.collectors);
-            main.jobs.extend(fragment.jobs);
+        let mut raw_collectors: Vec<_> = std::mem::take(&mut main.collectors)
+            .into_iter()
+            .enumerate()
+            .map(|(i, raw)| ("main file".to_owned(), i, raw))
+            .collect();
+        let mut raw_jobs: Vec<_> = std::mem::take(&mut main.jobs)
+            .into_iter()
+            .enumerate()
+            .map(|(i, raw)| ("main file".to_owned(), i, raw))
+            .collect();
+        for (file_index, (_, bytes)) in self.files.iter().enumerate().skip(1) {
+            let source = format!("fragment {file_index}");
+            let fragment =
+                parse::<Fragment>(bytes).map_err(|e| anyhow::anyhow!("{source}: {e}"))?;
+            raw_collectors.extend(
+                fragment
+                    .collectors
+                    .into_iter()
+                    .enumerate()
+                    .map(|(i, raw)| (source.clone(), i, raw)),
+            );
+            raw_jobs.extend(
+                fragment
+                    .jobs
+                    .into_iter()
+                    .enumerate()
+                    .map(|(i, raw)| (source.clone(), i, raw)),
+            );
         }
         ensure!(
             main.workspace_dirs.values().all(|p| p.is_absolute()),
@@ -321,125 +411,31 @@ impl Snapshot {
         let mut names = BTreeSet::new();
         let mut tokens = BTreeSet::new();
         let mut collectors = Vec::new();
-        for raw in main.collectors {
-            ensure!(
-                identifier(&raw.name, 64) && names.insert(raw.name.clone()),
-                "invalid or duplicate collector name"
+        for (source, index, raw) in raw_collectors {
+            let span = raw.span();
+            collectors.push(
+                validate_collector(raw.into_inner(), &mut names, &mut tokens).map_err(|e| {
+                    anyhow::anyhow!(
+                        "{source} collectors[{index}] bytes {}..{}: {e}",
+                        span.start,
+                        span.end
+                    )
+                })?,
             );
-            ensure!(
-                !raw.tokens.is_empty() && raw.tokens.len() <= 16,
-                "collector requires 1..16 mappings"
-            );
-            for (token, mapping) in &raw.tokens {
-                let field = &mapping.field;
-                for affix in [&mapping.prefix, &mapping.suffix] {
-                    ensure!(
-                        affix.chars().count() <= 80 && !affix.chars().any(char::is_control),
-                        "token prefix/suffix must contain at most 80 Unicode characters and no control characters"
-                    );
-                }
-                ensure!(
-                    identifier(token, 32) && tokens.insert(token.clone()),
-                    "invalid or duplicate token name"
-                );
-                ensure!(
-                    !field.is_empty() && field.len() <= 128,
-                    "invalid field selector"
-                );
-                if raw.provider == Provider::Git {
-                    ensure!(
-                        [
-                            "modified_files",
-                            "staged_files",
-                            "untracked_files",
-                            "conflict_files"
-                        ]
-                        .contains(&field.as_str()),
-                        "unsupported Git field"
-                    );
-                }
-                if raw.provider == Provider::Command && raw.output == Some(CommandOutput::Text) {
-                    ensure!(field == "stdout", "text output only supports stdout");
-                }
-            }
-            let interval = raw.interval_ms.unwrap_or(10000);
-            ensure!(
-                (250..=28_800_000).contains(&interval),
-                "invalid interval_ms"
-            );
-            let timeout = raw.timeout_ms.unwrap_or(interval.min(1000));
-            ensure!(
-                (1..=interval.min(300000)).contains(&timeout),
-                "invalid timeout_ms"
-            );
-            let ttl = raw.ttl_ms.unwrap_or(3 * interval);
-            ensure!((3 * interval..=86_400_000).contains(&ttl), "invalid ttl_ms");
-            match raw.provider {
-                Provider::Git => ensure!(
-                    raw.command.is_none()
-                        && !raw.global
-                        && raw.output.is_none()
-                        && raw.env.is_none()
-                        && raw.env_allow.is_none(),
-                    "Git does not accept command/global/output/env/env_allow"
-                ),
-                Provider::Command => ensure!(
-                    raw.command.as_deref().is_some_and(valid_argv),
-                    "command requires valid argv"
-                ),
-            }
-            let env = raw.env.unwrap_or_default();
-            let allow = environment(&env, raw.env_allow.unwrap_or_default())?;
-            collectors.push(Collector {
-                name: raw.name,
-                provider: raw.provider,
-                command: raw.command.unwrap_or_default(),
-                global: raw.global,
-                output: raw.output.unwrap_or_default(),
-                interval_ms: interval,
-                timeout_ms: timeout,
-                ttl_ms: ttl,
-                env,
-                env_allow: allow,
-                tokens: raw.tokens,
-            });
         }
         ensure!(tokens.len() <= 32, "configuration exceeds 32 tokens");
         collectors.sort_by(|a, b| a.name.cmp(&b.name));
-        ensure!(main.jobs.len() <= 16, "configuration exceeds 16 jobs");
+        ensure!(raw_jobs.len() <= 16, "configuration exceeds 16 jobs");
         let mut jobs = Vec::new();
-        for raw in main.jobs {
-            ensure!(
-                identifier(&raw.name, 64) && names.insert(raw.name.clone()),
-                "invalid or duplicate job name"
-            );
-            ensure!(valid_argv(&raw.command), "job command requires valid argv");
-            let interval = raw.interval_ms.unwrap_or(300_000);
-            ensure!(
-                (10_000..=86_400_000).contains(&interval),
-                "invalid job interval_ms"
-            );
-            let timeout = raw.timeout_ms.unwrap_or(interval.min(60_000));
-            ensure!(
-                (1..=interval.min(600_000)).contains(&timeout),
-                "invalid job timeout_ms"
-            );
-            let chunk_size = raw.chunk_size.unwrap_or(4);
-            ensure!((1..=16).contains(&chunk_size), "invalid job chunk_size");
-            let chunk_delay = raw.chunk_delay_ms.unwrap_or(0);
-            ensure!(chunk_delay <= interval, "invalid job chunk_delay_ms");
-            let allow = environment(&raw.env, raw.env_allow)?;
-            jobs.push(Job {
-                name: raw.name,
-                command: raw.command,
-                worktrees: raw.worktrees,
-                interval_ms: interval,
-                timeout_ms: timeout,
-                chunk_size,
-                chunk_delay_ms: chunk_delay,
-                env: raw.env,
-                env_allow: allow,
-            });
+        for (source, index, raw) in raw_jobs {
+            let span = raw.span();
+            jobs.push(validate_job(raw.into_inner(), &mut names).map_err(|e| {
+                anyhow::anyhow!(
+                    "{source} jobs[{index}] bytes {}..{}: {e}",
+                    span.start,
+                    span.end
+                )
+            })?);
         }
         jobs.sort_by(|a, b| a.name.cmp(&b.name));
         Ok(Config {
@@ -449,6 +445,150 @@ impl Snapshot {
             jobs,
         })
     }
+}
+fn validate_collector(
+    raw: RawCollector,
+    names: &mut BTreeSet<String>,
+    tokens: &mut BTreeSet<String>,
+) -> Result<Collector> {
+    ensure!(
+        identifier(&raw.name, 64) && names.insert(raw.name.clone()),
+        "invalid or duplicate collector name"
+    );
+    ensure!(
+        !raw.tokens.is_empty() && raw.tokens.len() <= 16,
+        "collector requires 1..16 mappings"
+    );
+    validate_mappings(&raw, tokens)?;
+    let (interval, timeout, ttl) = collector_timing(raw.interval_ms, raw.timeout_ms, raw.ttl_ms)?;
+    match raw.provider {
+        Provider::Git => ensure!(
+            raw.command.is_none()
+                && !raw.global
+                && raw.output.is_none()
+                && raw.env.is_none()
+                && raw.env_allow.is_none(),
+            "Git does not accept command/global/output/env/env_allow"
+        ),
+        Provider::Command => ensure!(
+            raw.command.as_deref().is_some_and(valid_argv),
+            "command requires valid argv"
+        ),
+    }
+    let env = raw.env.unwrap_or_default();
+    let allow = environment(&env, raw.env_allow.unwrap_or_default())?;
+    Ok(Collector {
+        name: raw.name,
+        kind: match raw.provider {
+            Provider::Git => CollectorKind::Git,
+            Provider::Command => CollectorKind::Command {
+                spec: CommandSpec {
+                    argv: raw.command.unwrap_or_default(),
+                    env,
+                    env_allow: allow,
+                },
+                scope: if raw.global {
+                    CommandScope::Global
+                } else {
+                    CommandScope::Workspace
+                },
+                output: raw.output.unwrap_or_default(),
+            },
+        },
+        interval_ms: interval,
+        timeout_ms: timeout,
+        ttl_ms: ttl,
+        tokens: raw.tokens,
+    })
+}
+fn validate_mappings(raw: &RawCollector, tokens: &mut BTreeSet<String>) -> Result<()> {
+    for (token, mapping) in &raw.tokens {
+        let field = &mapping.field;
+        for affix in [&mapping.prefix, &mapping.suffix] {
+            ensure!(
+                affix.chars().count() <= 80 && !affix.chars().any(char::is_control),
+                "token prefix/suffix must contain at most 80 Unicode characters and no control characters"
+            );
+        }
+        ensure!(
+            identifier(token, 32) && tokens.insert(token.clone()),
+            "invalid or duplicate token name"
+        );
+        ensure!(
+            !field.is_empty() && field.len() <= 128,
+            "invalid field selector"
+        );
+        if raw.provider == Provider::Git {
+            ensure!(
+                [
+                    "modified_files",
+                    "staged_files",
+                    "untracked_files",
+                    "conflict_files"
+                ]
+                .contains(&field.as_str()),
+                "unsupported Git field"
+            );
+        }
+        if raw.provider == Provider::Command && raw.output == Some(CommandOutput::Text) {
+            ensure!(field == "stdout", "text output only supports stdout");
+        }
+    }
+    Ok(())
+}
+fn collector_timing(
+    interval_ms: Option<u64>,
+    timeout_ms: Option<u64>,
+    ttl_ms: Option<u64>,
+) -> Result<(u64, u64, u64)> {
+    let interval = interval_ms.unwrap_or(10000);
+    ensure!(
+        (250..=28_800_000).contains(&interval),
+        "invalid interval_ms"
+    );
+    let timeout = timeout_ms.unwrap_or(interval.min(1000));
+    ensure!(
+        (1..=interval.min(300000)).contains(&timeout),
+        "invalid timeout_ms"
+    );
+    let ttl = ttl_ms.unwrap_or(3 * interval);
+    ensure!((3 * interval..=86_400_000).contains(&ttl), "invalid ttl_ms");
+    Ok((interval, timeout, ttl))
+}
+fn validate_job(raw: RawJob, names: &mut BTreeSet<String>) -> Result<Job> {
+    ensure!(
+        identifier(&raw.name, 64) && names.insert(raw.name.clone()),
+        "invalid or duplicate job name"
+    );
+    ensure!(valid_argv(&raw.command), "job command requires valid argv");
+    let interval = raw.interval_ms.unwrap_or(300_000);
+    ensure!(
+        (10_000..=86_400_000).contains(&interval),
+        "invalid job interval_ms"
+    );
+    let timeout = raw.timeout_ms.unwrap_or(interval.min(60_000));
+    ensure!(
+        (1..=interval.min(600_000)).contains(&timeout),
+        "invalid job timeout_ms"
+    );
+    let chunk_size = raw.chunk_size.unwrap_or(4);
+    ensure!((1..=16).contains(&chunk_size), "invalid job chunk_size");
+    let chunk_delay = raw.chunk_delay_ms.unwrap_or(0);
+    ensure!(chunk_delay <= interval, "invalid job chunk_delay_ms");
+    let allow = environment(&raw.env, raw.env_allow)?;
+    Ok(Job {
+        name: raw.name,
+        spec: CommandSpec {
+            argv: raw.command,
+            env: raw.env,
+            env_allow: allow,
+        },
+        worktrees: raw.worktrees,
+        interval_ms: interval,
+        timeout_ms: timeout,
+        chunk_size,
+        chunk_delay_ms: chunk_delay,
+    })
 }
 fn valid_argv(argv: &[String]) -> bool {
     !argv.is_empty() && !argv[0].is_empty() && argv.iter().all(|s| !s.contains('\0'))
@@ -493,18 +633,31 @@ fn env_name(s: &str) -> bool {
         && s.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_')
 }
 impl Config {
+    pub fn collectors(&self) -> &[Collector] {
+        &self.collectors
+    }
+    pub fn jobs(&self) -> &[Job] {
+        &self.jobs
+    }
+
     pub fn load(dir: &Path) -> Result<Self> {
         Snapshot::read(dir)?.parse()
     }
     pub fn hash(&self) -> String {
         hash(&serde_json::to_vec(self).expect("config serialization"))
     }
-    /// The configuration without background jobs, to detect job-only reloads.
-    pub fn without_jobs(&self) -> Self {
-        Self {
-            jobs: Vec::new(),
-            ..self.clone()
+    /// Compare the collector/runtime boundary without cloning background jobs.
+    pub fn same_collection_config(&self, other: &Self) -> bool {
+        self.runtime == other.runtime
+            && self.workspace_dirs == other.workspace_dirs
+            && self.collectors == other.collectors
+    }
+    pub fn from_toml(text: &str) -> Result<Self> {
+        ensure!(text.len() <= 1_048_576, "configuration exceeds 1 MiB");
+        Snapshot {
+            files: vec![(PathBuf::from("tokens.toml"), text.as_bytes().to_vec())],
         }
+        .parse()
     }
     pub fn token_names(&self) -> BTreeSet<String> {
         self.collectors
@@ -515,7 +668,7 @@ impl Config {
     pub fn workspace_token_names(&self) -> BTreeSet<String> {
         self.collectors
             .iter()
-            .filter(|c| !c.global)
+            .filter(|c| !c.global())
             .flat_map(|c| c.tokens.keys().cloned())
             .collect()
     }
