@@ -33,6 +33,11 @@ title = "Reload token configuration"
 command = ["./target/release/herdr-tokens", "reload"]
 
 [[actions]]
+id = "run-jobs"
+title = "Run background jobs"
+command = ["./target/release/herdr-tokens", "run-job"]
+
+[[actions]]
 id = "status"
 title = "Inspect tokens emitter"
 command = ["./target/release/herdr-tokens", "status"]

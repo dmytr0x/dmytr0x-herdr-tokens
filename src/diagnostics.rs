@@ -2,10 +2,11 @@ use crate::providers::Patch;
 use anyhow::Result;
 use serde_json::{Value, json};
 use std::{
+    collections::BTreeMap,
     fs::{self, File, OpenOptions},
     io::{self, Write},
     os::unix::fs::OpenOptionsExt,
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{Arc, Mutex},
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -43,6 +44,50 @@ impl JobStatus {
             v["last_acknowledged"] = json!(self.last_acknowledged);
         }
         v
+    }
+}
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct TargetStatus {
+    pub workspaces: Vec<String>,
+    pub running: bool,
+    pub last_exit: Option<i32>,
+    pub duration_ms: Option<u64>,
+    pub consecutive_failures: u64,
+    pub error: Option<String>,
+}
+impl TargetStatus {
+    pub fn json(&self, dir: &Path) -> Value {
+        json!({
+            "dir": dir, "workspaces": self.workspaces, "running": self.running, "last_exit": self.last_exit,
+            "duration_ms": self.duration_ms, "consecutive_failures": self.consecutive_failures, "error": self.error,
+        })
+    }
+}
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LastRun {
+    pub completed: Instant,
+    pub duration_ms: u64,
+    pub targets: u64,
+    pub succeeded: u64,
+    pub failed: u64,
+    pub skipped: u64,
+}
+#[derive(Clone, Debug, Default)]
+pub struct BackgroundStatus {
+    pub missed_deadlines: u64,
+    pub last_run: Option<LastRun>,
+    pub targets: BTreeMap<PathBuf, TargetStatus>,
+}
+impl BackgroundStatus {
+    pub fn json(&self) -> Value {
+        json!({
+            "missed_deadlines": self.missed_deadlines,
+            "last_run": self.last_run.as_ref().map(|r| json!({
+                "age_ms": age(Some(r.completed)), "duration_ms": r.duration_ms, "targets": r.targets,
+                "succeeded": r.succeeded, "failed": r.failed, "skipped": r.skipped,
+            })),
+            "targets": self.targets.iter().map(|(dir, t)| t.json(dir)).collect::<Vec<_>>(),
+        })
     }
 }
 struct Log {

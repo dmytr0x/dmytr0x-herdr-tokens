@@ -1,4 +1,5 @@
 //! Single coordinator: tasks do IO, only this module commits state transitions.
+mod background;
 mod job;
 use crate::{
     config::{Config, Snapshot},
@@ -9,6 +10,7 @@ use crate::{
     runtime::{self, Control, Endpoint, Identity, Response, Sequences},
 };
 use anyhow::Result;
+use background::BackgroundJob;
 use job::{Job, jitter};
 use serde_json::{Value, json};
 use std::{
@@ -40,6 +42,7 @@ struct Coordinator {
     workspaces: BTreeMap<String, Workspace>,
     jobs: BTreeMap<Key, Job>,
     global_jobs: BTreeMap<String, Job>,
+    background: BTreeMap<String, BackgroundJob>,
     publisher: Publisher,
     report_errors: BTreeMap<String, (String, u64)>,
     sequences: Sequences,
@@ -258,6 +261,41 @@ impl Coordinator {
             );
         }
     }
+    /// Keeps unchanged background jobs running; cancels changed and removed ones.
+    async fn rebuild_background(&mut self) {
+        let mut old = std::mem::take(&mut self.background);
+        let mut stale = Vec::new();
+        for job in &self.config.jobs {
+            match old.remove(&job.name) {
+                Some(kept) if kept.job == *job => {
+                    self.background.insert(job.name.clone(), kept);
+                }
+                replaced => {
+                    stale.extend(replaced);
+                    self.order += 1;
+                    self.background.insert(
+                        job.name.clone(),
+                        BackgroundJob::new(job.clone(), self.order),
+                    );
+                }
+            }
+        }
+        stale.extend(old.into_values());
+        for job in &stale {
+            job.signal_cancel();
+        }
+        for mut job in stale {
+            job.cancel().await;
+        }
+    }
+    async fn cancel_background(&mut self) {
+        for job in self.background.values() {
+            job.signal_cancel();
+        }
+        for job in self.background.values_mut() {
+            job.cancel().await;
+        }
+    }
     fn publish_global_cache(&mut self, workspace: &str) {
         let cached: Vec<_> = self
             .global_jobs
@@ -365,6 +403,18 @@ impl Coordinator {
             self.rejected = None;
             return Ok(false);
         }
+        if config.without_jobs() == self.config.without_jobs() {
+            // Collectors, generations and publications are untouched.
+            self.config = config;
+            self.rejected = None;
+            self.rebuild_background().await;
+            tracing::info!(
+                endpoint = %self.identity.endpoint,
+                generation = self.config_generation,
+                "background job configuration committed"
+            );
+            return Ok(true);
+        }
         self.cancel_jobs().await;
         self.finish_report().await?;
         // Discovery results computed using old overrides must never be committed.
@@ -394,6 +444,7 @@ impl Coordinator {
         self.config = config;
         self.rejected = None;
         self.rebuild_jobs();
+        self.rebuild_background().await;
         self.discover_due = Instant::now();
         tracing::info!(
             endpoint = %self.identity.endpoint,
@@ -534,7 +585,12 @@ impl Coordinator {
                 }
             }
         }
-        if self.connection != "Connected" {
+        let connected = self.connection == "Connected";
+        for job in self.background.values_mut() {
+            job.tick(connected, &self.workspaces, &self.identity.endpoint)
+                .await;
+        }
+        if !connected {
             return Ok(());
         }
         let running = self
@@ -670,6 +726,7 @@ impl Coordinator {
             "config_hash": self.config.hash(), "config_files_hash": self.observed_hash, "config_generation": self.config_generation,
             "rejected_candidates": self.rejected_generation, "last_rejected_error": self.rejected, "connection": self.connection,
             "connection_generation": self.connection_generation, "discovery_error": self.discovery_error, "workspaces": workspaces, "jobs": jobs,
+            "background_jobs": self.background.values().map(BackgroundJob::json).collect::<Vec<_>>(),
             "knowledge": "Local emitter observations only; acknowledgements do not prove current Herdr ownership or visibility."})
     }
     async fn control(&mut self, control: Control) -> (bool, Response) {
@@ -689,6 +746,24 @@ impl Coordinator {
                     ok = false;
                     json!({"accepted":false,"error":e.to_string()})
                 }
+            },
+            "run-job" => match control.request.job.as_deref() {
+                None => {
+                    for job in self.background.values_mut() {
+                        job.trigger();
+                    }
+                    json!({"scheduled":true})
+                }
+                Some(name) => match self.background.get_mut(name) {
+                    Some(job) => {
+                        job.trigger();
+                        json!({"scheduled":true})
+                    }
+                    None => {
+                        ok = false;
+                        json!({"error":"unknown job"})
+                    }
+                },
             },
             "stop" => {
                 stop = true;
@@ -712,7 +787,11 @@ impl Coordinator {
     async fn shutdown(&mut self) {
         let deadline = Instant::now() + Duration::from_secs(5);
         self.config_generation += 1;
+        for job in self.background.values() {
+            job.signal_cancel();
+        }
         self.cancel_jobs().await;
+        self.cancel_background().await;
         let _ = self.finish_report().await;
         if let Some(discovery) = self.discovery.take() {
             let _ = discovery.await;
@@ -789,6 +868,7 @@ pub async fn run(
         workspaces: BTreeMap::new(),
         jobs: BTreeMap::new(),
         global_jobs: BTreeMap::new(),
+        background: BTreeMap::new(),
         publisher: Publisher::default(),
         report_errors: BTreeMap::new(),
         sequences,
@@ -802,6 +882,7 @@ pub async fn run(
         candidate: None,
         observed_hash: snapshot.hash(),
     };
+    c.rebuild_background().await;
     tracing::info!(endpoint = %endpoint.hash, generation = 1, "runner ready");
     let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
     let mut interrupt = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;

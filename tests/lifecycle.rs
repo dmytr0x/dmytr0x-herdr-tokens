@@ -669,3 +669,272 @@ fn cli_exit_codes_validate_never_executes_and_no_implicit_endpoint() {
     assert_eq!(o.status.code(), Some(2));
     assert_eq!(h.cmd("status").output().unwrap().status.code(), Some(1));
 }
+
+fn git(dir: &std::path::Path, args: &[&str]) {
+    let out = Command::new("git")
+        .args(args)
+        .current_dir(dir)
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_AUTHOR_NAME", "Test")
+        .env("GIT_AUTHOR_EMAIL", "test@example.invalid")
+        .env("GIT_COMMITTER_NAME", "Test")
+        .env("GIT_COMMITTER_EMAIL", "test@example.invalid")
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+impl Harness {
+    /// `repo` (main worktree, never opened) with `linked` open as w1; w2 stays a plain directory.
+    fn worktrees(&self) {
+        let repo = self.root.join("repo");
+        fs::create_dir(&repo).unwrap();
+        git(&repo, &["init", "-q"]);
+        git(&repo, &["commit", "-q", "--allow-empty", "-m", "init"]);
+        git(&repo, &["worktree", "add", "-q", "../linked"]);
+        self.settings(
+            json!({"workspaces":{"w1":self.root.join("linked"),"w2":self.root.join("w2")}}),
+        );
+    }
+    /// Appends `jobs` to the default collector configuration.
+    fn jobs(&self, jobs: &str) {
+        self.config("old");
+        let text = fs::read_to_string(self.root.join("config/tokens.toml")).unwrap();
+        self.atomic("config/tokens.toml", &format!("{text}{jobs}"));
+    }
+    fn background(&self, name: &str) -> Value {
+        self.status(false).unwrap()["background_jobs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|j| j["name"] == name)
+            .cloned()
+            .unwrap()
+    }
+    fn lines(&self, path: &str) -> Vec<String> {
+        fs::read_to_string(self.root.join(path))
+            .unwrap_or_default()
+            .lines()
+            .map(Into::into)
+            .collect()
+    }
+}
+/// A job that appends `$PWD $HERDR_TOKENS_WORKSPACE_IDS` to `root/log`.
+fn logging_job(h: &Harness, name: &str, extra: &str, log: &str) -> String {
+    let argv = serde_json::to_string(&[
+        "/bin/sh",
+        "-c",
+        &format!(
+            "echo \"$PWD $HERDR_TOKENS_WORKSPACE_IDS\" >> {}",
+            h.root.join(log).display()
+        ),
+    ])
+    .unwrap();
+    format!("[[jobs]]\nname='{name}'\ncommand={argv}\ninterval_ms=10000\n{extra}\n")
+}
+fn alive(pid_file: &std::path::Path) -> bool {
+    let pid: i32 = fs::read_to_string(pid_file)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), None).is_ok()
+}
+#[test]
+fn background_main_and_all_modes_resolve_worktrees_and_skip_plain_directories() {
+    let mut h = Harness::new();
+    h.worktrees();
+    h.jobs(&format!(
+        "{}{}",
+        logging_job(&h, "main", "", "main.log"),
+        logging_job(&h, "all", "worktrees='all'", "all.log")
+    ));
+    h.spawn();
+    h.wait(|h| {
+        ["main", "all"]
+            .iter()
+            .all(|j| !h.background(j)["last_run"].is_null())
+    });
+    assert_eq!(
+        h.lines("main.log"),
+        [format!("{} w1", h.root.join("repo").display())]
+    );
+    assert_eq!(
+        h.lines("all.log"),
+        [format!("{} w1", h.root.join("linked").display())]
+    );
+    for name in ["main", "all"] {
+        let job = h.background(name);
+        assert_eq!(job["phase"], "idle");
+        assert_eq!(job["last_run"]["targets"], 1);
+        assert_eq!(job["last_run"]["succeeded"], 1);
+        assert_eq!(job["last_run"]["skipped"], 1);
+        assert_eq!(job["targets"][0]["last_exit"], 0);
+        assert_eq!(job["targets"][0]["workspaces"], json!(["w1"]));
+    }
+    h.stop();
+}
+#[test]
+fn background_main_mode_runs_in_bare_repository() {
+    let mut h = Harness::new();
+    let source = h.root.join("source");
+    fs::create_dir(&source).unwrap();
+    git(&source, &["init", "-q"]);
+    git(&source, &["commit", "-q", "--allow-empty", "-m", "init"]);
+    git(&h.root, &["clone", "-q", "--bare", "source", "bare.git"]);
+    git(
+        &h.root.join("bare.git"),
+        &["worktree", "add", "-q", "../wt"],
+    );
+    h.settings(json!({"workspaces":{"w1":h.root.join("wt")}}));
+    h.jobs(&logging_job(&h, "main", "", "main.log"));
+    h.spawn();
+    h.wait(|h| !h.lines("main.log").is_empty());
+    assert_eq!(
+        h.lines("main.log"),
+        [format!("{} w1", h.root.join("bare.git").display())]
+    );
+    h.stop();
+}
+#[test]
+fn background_chunks_bound_concurrency() {
+    let mut h = Harness::new();
+    let mut workspaces = serde_json::Map::new();
+    for i in 1..=5 {
+        let dir = h.root.join(format!("r{i}"));
+        fs::create_dir(&dir).unwrap();
+        git(&dir, &["init", "-q"]);
+        workspaces.insert(format!("w{i}"), json!(dir));
+    }
+    h.settings(json!({"workspaces": workspaces}));
+    let log = h.root.join("chunks.log");
+    let argv = serde_json::to_string(&[
+        "/bin/sh",
+        "-c",
+        &format!(
+            "echo start >> {0}; sleep 0.3; echo end >> {0}",
+            log.display()
+        ),
+    ])
+    .unwrap();
+    h.jobs(&format!(
+        "[[jobs]]\nname='chunked'\ncommand={argv}\ninterval_ms=10000\nchunk_size=2\n"
+    ));
+    h.spawn();
+    h.wait(|h| h.lines("chunks.log").len() == 10);
+    let mut running = 0;
+    let mut peak = 0;
+    for line in h.lines("chunks.log") {
+        running += if line == "start" { 1 } else { -1 };
+        peak = peak.max(running);
+    }
+    assert_eq!(peak, 2);
+    h.wait(|h| h.background("chunked")["last_run"]["succeeded"] == 5);
+    h.stop();
+}
+#[test]
+fn run_job_triggers_idle_jobs_and_rejects_unknown_names() {
+    let mut h = Harness::new();
+    h.worktrees();
+    let slow = "interval_ms=86400000";
+    h.jobs(
+        &format!(
+            "{}{}",
+            logging_job(&h, "a", "", "a.log").replace("interval_ms=10000\n", ""),
+            logging_job(&h, "b", "", "b.log").replace("interval_ms=10000\n", "")
+        )
+        .replace("\n\n", &format!("\n{slow}\n")),
+    );
+    h.spawn();
+    let o = h
+        .cmd("run-job")
+        .args(["--job", "unknown"])
+        .output()
+        .unwrap();
+    assert_eq!(o.status.code(), Some(1));
+    assert!(
+        h.cmd("run-job")
+            .args(["--job", "a"])
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
+    h.wait(|h| h.lines("a.log").len() == 1);
+    assert!(h.lines("b.log").is_empty());
+    // The manifest action runs `run-job` without arguments: every job is triggered.
+    assert!(h.cmd("run-job").output().unwrap().status.success());
+    h.wait(|h| h.lines("a.log").len() == 2 && h.lines("b.log").len() == 1);
+    assert!(h.background("a")["next_due_in_ms"].as_u64().unwrap() > 80_000_000);
+    h.stop();
+}
+#[test]
+fn job_only_reload_keeps_collectors_and_publications() {
+    let mut h = Harness::new();
+    h.worktrees();
+    h.jobs(&logging_job(&h, "a", "", "a.log"));
+    h.spawn();
+    h.wait(|h| h.reports().len() >= 2);
+    let before = h.status(false).unwrap();
+    let n = h.reports().len();
+    h.jobs(&format!(
+        "{}{}",
+        logging_job(&h, "a", "", "a.log"),
+        logging_job(&h, "b", "", "b.log")
+    ));
+    let o = h.cmd("reload").output().unwrap();
+    assert!(o.status.success());
+    let after = h.status(false).unwrap();
+    assert_eq!(after["config_generation"], before["config_generation"]);
+    assert_ne!(after["config_hash"], before["config_hash"]);
+    assert_eq!(after["background_jobs"].as_array().unwrap().len(), 2);
+    h.wait(|h| h.reports().len() >= n + 4);
+    assert!(!h.reports()[n..].iter().any(|r| {
+        r["args"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("--clear-token"))
+    }));
+    h.stop();
+}
+#[test]
+fn changed_job_reload_and_stop_kill_running_process_groups() {
+    let mut h = Harness::new();
+    h.worktrees();
+    let root = h.root.clone();
+    let job = move |interval: u64, file: &str| {
+        let argv = serde_json::to_string(&[
+            "/bin/sh",
+            "-c",
+            &format!("echo $$ > {}; exec sleep 30", root.join(file).display()),
+        ])
+        .unwrap();
+        format!("[[jobs]]\nname='slow'\ncommand={argv}\ninterval_ms={interval}\ntimeout_ms=60000\n")
+    };
+    h.jobs(&job(86_400_000, "first.pid"));
+    h.spawn();
+    assert!(h.cmd("run-job").output().unwrap().status.success());
+    h.wait(|h| {
+        h.root.join("first.pid").exists() && h.background("slow")["targets"][0]["running"] == true
+    });
+    let first = h.root.join("first.pid");
+    // The collector keeps publishing while the job sleeps.
+    let n = h.reports().len();
+    h.wait(|h| h.reports().len() >= n + 4);
+    assert!(alive(&first));
+    h.jobs(&job(86_300_000, "second.pid"));
+    assert!(h.cmd("reload").output().unwrap().status.success());
+    h.wait(|_| !alive(&first));
+    assert!(h.cmd("run-job").output().unwrap().status.success());
+    let second = h.root.join("second.pid");
+    h.wait(|h| h.root.join("second.pid").exists());
+    h.wait(|_| alive(&second));
+    let started = Instant::now();
+    h.stop();
+    assert!(started.elapsed() < Duration::from_secs(5));
+    assert!(!alive(&second));
+}

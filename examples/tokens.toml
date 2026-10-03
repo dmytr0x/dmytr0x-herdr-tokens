@@ -38,6 +38,17 @@ git_conflicts = { field = "conflict_files", prefix = "✖" }
 # [collectors.tokens]
 # current_date = "stdout"
 
+# Background job: fetch each open repository every 5 minutes, in its main
+# worktree. Publishes no tokens; see "Background jobs" in the README.
+# [[jobs]]
+# name = "fetch"
+# command = ["git", "fetch", "--all", "--prune", "--quiet"]
+# worktrees = "main"
+# interval_ms = 300000
+# timeout_ms = 60000
+# chunk_size = 4
+# env_allow = ["SSH_AUTH_SOCK"]
+
 # Only enable repository-controlled scripts in repositories you trust.
 # [[collectors]]
 # name = "ci"

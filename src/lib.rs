@@ -52,6 +52,11 @@ enum Command {
         #[arg(long)]
         include_values: bool,
     },
+    /// Trigger background jobs now (all, or one by name).
+    RunJob {
+        #[arg(long)]
+        job: Option<String>,
+    },
 }
 #[derive(Debug, thiserror::Error)]
 #[error("{0}")]
@@ -101,10 +106,12 @@ pub async fn execute(cli: Cli) -> Result<()> {
             return runner::run(endpoint, identity, herdr, cli.detached).await;
         }
         let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-        if let Ok(response) =
-            tokio::time::timeout_at(deadline, runtime::request(&endpoint, "ping", None, false))
-                .await
-                .context("runner readiness timed out")?
+        if let Ok(response) = tokio::time::timeout_at(
+            deadline,
+            runtime::request(&endpoint, "ping", None, false, None),
+        )
+        .await
+        .context("runner readiness timed out")?
         {
             ensure!(
                 response.identity == identity,
@@ -142,10 +149,12 @@ pub async fn execute(cli: Cli) -> Result<()> {
         }
         let mut child = command.spawn().context("cannot start detached runner")?;
         loop {
-            if let Ok(response) =
-                tokio::time::timeout_at(deadline, runtime::request(&endpoint, "ping", None, false))
-                    .await
-                    .context("runner readiness timed out")?
+            if let Ok(response) = tokio::time::timeout_at(
+                deadline,
+                runtime::request(&endpoint, "ping", None, false, None),
+            )
+            .await
+            .context("runner readiness timed out")?
             {
                 ensure!(
                     response.identity == identity,
@@ -169,9 +178,14 @@ pub async fn execute(cli: Cli) -> Result<()> {
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
     }
+    let mut job = None;
     let (command, workspace, values, json_output) = match cli.command {
         Command::Stop => ("stop", None, false, false),
         Command::Reload => ("reload", None, false, false),
+        Command::RunJob { job: name } => {
+            job = name;
+            ("run-job", None, false, false)
+        }
         Command::Refresh { workspace } => {
             let action = std::env::var("HERDR_PLUGIN_ID").as_deref() == Ok(PLUGIN_ID)
                 && std::env::var("HERDR_PLUGIN_ACTION_ID")
@@ -189,7 +203,7 @@ pub async fn execute(cli: Cli) -> Result<()> {
         } => ("status", None, include_values, json),
         _ => unreachable!(),
     };
-    let response = runtime::request(&endpoint, command, workspace, values).await?;
+    let response = runtime::request(&endpoint, command, workspace, values, job).await?;
     if !response.ok {
         if command == "reload"
             && response.result.get("accepted") == Some(&serde_json::Value::Bool(false))

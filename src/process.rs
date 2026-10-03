@@ -28,6 +28,14 @@ pub enum Error {
     #[error("process output limit exceeded")]
     Overflow,
 }
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Capture {
+    /// Keep output up to the request limits; exceeding a limit is `Error::Overflow`.
+    #[default]
+    Bounded,
+    /// Drain and count output without keeping it; limits are ignored.
+    Discard,
+}
 #[derive(Clone)]
 pub struct Request {
     pub argv: Vec<OsString>,
@@ -36,11 +44,15 @@ pub struct Request {
     pub timeout: Duration,
     pub stdout_limit: usize,
     pub stderr_limit: usize,
+    pub capture: Capture,
 }
+/// `stdout`/`stderr` are empty under `Capture::Discard`; the byte counts are always set.
 pub struct Output {
     pub status: ExitStatus,
     pub stdout: Vec<u8>,
     pub stderr: Vec<u8>,
+    pub stdout_bytes: u64,
+    pub stderr_bytes: u64,
 }
 pub fn environment() -> BTreeMap<OsString, OsString> {
     let mut env = BTreeMap::new();
@@ -81,13 +93,22 @@ pub fn resolve(
                 .is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
         })
 }
-async fn bounded(mut pipe: impl AsyncRead + Unpin, limit: usize) -> Result<Vec<u8>, Error> {
+async fn drain(
+    mut pipe: impl AsyncRead + Unpin,
+    limit: usize,
+    capture: Capture,
+) -> Result<(Vec<u8>, u64), Error> {
     let mut out = Vec::new();
+    let mut total = 0u64;
     let mut buf = [0; 8192];
     loop {
         let n = pipe.read(&mut buf).await.map_err(|_| Error::Io)?;
         if n == 0 {
-            return Ok(out);
+            return Ok((out, total));
+        }
+        total += n as u64;
+        if capture == Capture::Discard {
+            continue;
         }
         if n > limit.saturating_sub(out.len()) {
             return Err(Error::Overflow);
@@ -119,15 +140,17 @@ pub async fn execute(req: Request, cancel: CancellationToken) -> Result<Output, 
     let stdout = child.stdout.take().ok_or(Error::Io)?;
     let stderr = child.stderr.take().ok_or(Error::Io)?;
     let operation = async {
-        let (status, stdout, stderr) = tokio::try_join!(
+        let (status, (stdout, stdout_bytes), (stderr, stderr_bytes)) = tokio::try_join!(
             async { child.wait().await.map_err(|_| Error::Io) },
-            bounded(stdout, req.stdout_limit),
-            bounded(stderr, req.stderr_limit)
+            drain(stdout, req.stdout_limit, req.capture),
+            drain(stderr, req.stderr_limit, req.capture)
         )?;
         Ok(Output {
             status,
             stdout,
             stderr,
+            stdout_bytes,
+            stderr_bytes,
         })
     };
     let result = tokio::select! {

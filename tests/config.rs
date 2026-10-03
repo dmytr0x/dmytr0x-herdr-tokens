@@ -1,4 +1,4 @@
-use herdr_tokens::config::{CommandOutput, Config, Snapshot};
+use herdr_tokens::config::{CommandOutput, Config, Snapshot, Worktrees};
 use std::{fs, path::PathBuf};
 fn directory() -> (tempfile::TempDir, PathBuf) {
     let t = tempfile::tempdir().unwrap();
@@ -268,4 +268,97 @@ fn command_text_output_rejects_non_stdout_mapping() {
 #[test]
 fn shipped_examples_validate() {
     Config::load(&PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples")).unwrap();
+}
+
+const JOB: &str = "[[jobs]]\nname='fetch'\ncommand=['git','fetch']\n";
+#[test]
+fn job_defaults_and_bounds() {
+    let (_t, p) = directory();
+    fs::write(p.join("tokens.toml"), format!("schema_version=1\n{JOB}")).unwrap();
+    let job = Config::load(&p).unwrap().jobs.remove(0);
+    assert_eq!(
+        (
+            job.worktrees,
+            job.interval_ms,
+            job.timeout_ms,
+            job.chunk_size,
+            job.chunk_delay_ms
+        ),
+        (Worktrees::Main, 300_000, 60_000, 4, 0)
+    );
+    let set = |extra: &str| {
+        fs::write(
+            p.join("tokens.toml"),
+            format!("schema_version=1\n{JOB}{extra}\n"),
+        )
+        .unwrap();
+        Config::load(&p)
+    };
+    let job = set("interval_ms=10000").unwrap().jobs.remove(0);
+    assert_eq!(job.timeout_ms, 10_000);
+    let job = set("worktrees='all'\ninterval_ms=86400000\ntimeout_ms=600000\nchunk_size=16\nchunk_delay_ms=86400000")
+        .unwrap()
+        .jobs
+        .remove(0);
+    assert_eq!(job.worktrees, Worktrees::All);
+    for (extra, valid) in [
+        ("interval_ms=9999", false),
+        ("interval_ms=86400001", false),
+        ("timeout_ms=0", false),
+        ("timeout_ms=600001\ninterval_ms=900000", false),
+        ("interval_ms=10000\ntimeout_ms=10001", false),
+        ("chunk_size=0", false),
+        ("chunk_size=17", false),
+        ("interval_ms=10000\nchunk_delay_ms=10001", false),
+        ("interval_ms=10000\nchunk_delay_ms=10000", true),
+        ("worktrees='linked'", false),
+        ("unknown=1", false),
+        ("tokens={x='y'}", false),
+        ("env_allow=['HERDR_TOKENS_JOB']", false),
+        ("env={HERDR_TOKENS_WORKTREE_DIR='x'}", false),
+        ("env={HERDR_TOKENS_WORKSPACE_IDS='x'}", false),
+        ("env={NAME='x'}\nenv_allow=['HOME']", true),
+    ] {
+        assert_eq!(set(extra).is_ok(), valid, "{extra}");
+    }
+}
+#[test]
+fn job_names_commands_limits_and_fragments() {
+    let (_t, p) = directory();
+    let bad = [
+        format!("schema_version=1\n{JOB}{JOB}"),
+        format!(
+            "schema_version=1\n{COLLECTOR}{}",
+            JOB.replace("'fetch'", "'ci'")
+        ),
+        format!(
+            "schema_version=1\n{}",
+            JOB.replace("'fetch'", "'has space'")
+        ),
+        format!("schema_version=1\n{}", JOB.replace("['git','fetch']", "[]")),
+        format!(
+            "schema_version=1\n{}",
+            JOB.replace("['git','fetch']", "['']")
+        ),
+        (0..17).fold("schema_version=1\n".to_owned(), |s, i| {
+            s + &JOB.replace("'fetch'", &format!("'j{i}'"))
+        }),
+    ];
+    for (i, text) in bad.iter().enumerate() {
+        fs::write(p.join("tokens.toml"), text).unwrap();
+        assert!(Config::load(&p).is_err(), "case {i}");
+    }
+    fs::write(
+        p.join("tokens.toml"),
+        format!("schema_version=1\n{COLLECTOR}"),
+    )
+    .unwrap();
+    fs::create_dir(p.join("tokens.d")).unwrap();
+    fs::write(p.join("tokens.d/b.toml"), JOB.replace("'fetch'", "'b'")).unwrap();
+    fs::write(p.join("tokens.d/a.toml"), JOB.replace("'fetch'", "'a'")).unwrap();
+    let config = Config::load(&p).unwrap();
+    let names: Vec<_> = config.jobs.iter().map(|j| j.name.as_str()).collect();
+    assert_eq!(names, ["a", "b"]);
+    assert_eq!(config.without_jobs().collectors, config.collectors);
+    assert!(config.without_jobs().jobs.is_empty());
 }

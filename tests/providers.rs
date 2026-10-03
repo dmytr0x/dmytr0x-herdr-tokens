@@ -300,10 +300,18 @@ async fn real_git_status_rename_weird_names_worktrees_and_conflicts() {
     assert_eq!(c["staged_files"], Token::Set("0".into()));
     let nonrepo = tempfile::tempdir().unwrap();
     assert!(
+        counts(nonrepo.path())
+            .await
+            .values()
+            .all(|v| *v == Token::Clear)
+    );
+    let bare = tempfile::tempdir().unwrap();
+    git(bare.path(), &["init", "-q", "--bare"]);
+    assert!(
         providers::collect(
             &git_collector(),
             "w1",
-            nonrepo.path(),
+            bare.path(),
             CancellationToken::new()
         )
         .await

@@ -85,6 +85,7 @@ impl Herdr {
                 timeout: Duration::from_secs(1),
                 stdout_limit: 4 * 1_048_576,
                 stderr_limit: 65536,
+                capture: process::Capture::Bounded,
             },
             CancellationToken::new(),
         )

@@ -258,6 +258,8 @@ pub struct Request {
     pub workspace: Option<String>,
     #[serde(default)]
     pub include_values: bool,
+    #[serde(default)]
+    pub job: Option<String>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Response {
@@ -338,6 +340,7 @@ pub async fn request(
     command: &str,
     workspace: Option<String>,
     include_values: bool,
+    job: Option<String>,
 ) -> Result<Response> {
     managed(&endpoint.control, true)?;
     let response = tokio::time::timeout(Duration::from_secs(5), async {
@@ -350,6 +353,7 @@ pub async fn request(
             command: command.into(),
             workspace,
             include_values,
+            job,
         };
         let mut bytes = serde_json::to_vec(&req)?;
         bytes.push(b'\n');
@@ -390,7 +394,7 @@ pub async fn request(
     Ok(response)
 }
 pub async fn matching(endpoint: &Endpoint, identity: &Identity) -> Result<()> {
-    let r = request(endpoint, "ping", None, false).await?;
+    let r = request(endpoint, "ping", None, false, None).await?;
     ensure!(
         &r.identity == identity,
         "runner conflict: endpoint uses different config/state locations"

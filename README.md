@@ -76,6 +76,7 @@ herdr-tokens validate
 herdr-tokens reload
 herdr-tokens refresh [--workspace ID]
 herdr-tokens status [--json] [--include-values]
+herdr-tokens run-job [--job NAME]
 ```
 
 | Option | Default |
@@ -183,7 +184,7 @@ The Git provider uses installed Git with porcelain-v2 NUL-delimited output, opti
 - `untracked_files`: files, not collapsed directories.
 - `conflict_files`: unmerged entries, counted only here.
 
-Zero is a real value. A non-repository or unsafe/unavailable checkout fails; it does not fabricate zeros. Detached HEAD, linked worktrees and absent upstream work normally. These are **file counts, not diff line counts**. Git collectors reject `command`, `env` and `env_allow`.
+Zero is a real value. A directory outside any Git repository clears the collector's tokens without an error. An unsafe or unavailable checkout fails. Neither case fabricates zeros. Detached HEAD, linked worktrees and absent upstream work normally. These are **file counts, not diff line counts**. Git collectors reject `command`, `env` and `env_allow`.
 
 ### Customize token appearance
 
@@ -240,6 +241,51 @@ Content is polled each second and a changed snapshot confirmed after 200 ms. Inv
 Successful collections refresh TTL even when values are unchanged. Failures do not publish fake error values or refresh old TTLs. Queued results older than their collector interval are discarded; TTL is reduced by queue age. Under overload/outage, values can expire despite the 3× interval minimum. Missed deadlines are observable, never hidden by extending TTL.
 
 Herdr has a shared 32-key workspace map, not source-owned namespaces. **Reserve exclusive token names for this plugin.** Another reporter can overwrite or be cleared by it; the plugin cannot detect ownership. It never clears arbitrary unconfigured keys to recover capacity. Normal collector reports contain at most 16 keys. Larger reconciliation clears are chunked, serialized and fenced with barriers.
+
+### Background jobs
+
+A `[[jobs]]` entry runs a command on a fixed interval in the Git repositories that have a worktree open in a discovered workspace. Jobs publish no tokens; they only record outcomes in `status`. The typical use is `git fetch`:
+
+```toml
+[[jobs]]
+name = "fetch"
+command = ["git", "fetch", "--all", "--prune", "--quiet"]
+worktrees = "main"
+interval_ms = 300000
+timeout_ms = 60000
+chunk_size = 4
+chunk_delay_ms = 0
+env_allow = ["SSH_AUTH_SOCK"]
+```
+
+| Field | Default | Allowed |
+|---|---|---|
+| `name` | required | identifier, 1–64 chars, unique across jobs and collectors |
+| `command` | required | nonempty argv, same rule as command collectors |
+| `worktrees` | `main` | `main`, `all` |
+| `interval_ms` | 300000 | 10000–86400000, start to start |
+| `timeout_ms` | min(60000, interval) | 1–min(interval, 600000), per process |
+| `chunk_size` | 4 | 1–16 |
+| `chunk_delay_ms` | 0 | 0–interval |
+| `env`, `env_allow` | empty | same rules as collectors |
+
+At most 16 jobs; `[[jobs]]` is allowed in `tokens.d` fragments. Any job enables the Git ≥ 2.20 check.
+
+**Targets.** Each run takes every workspace with a resolved directory (same priority as workspace-scoped collectors) and asks Git for its worktree and common directory. Directories outside a Git work tree are counted as `skipped`. With `worktrees = "main"` the command runs once per repository in its main worktree (the repository directory for a bare repository), even if no workspace has the main worktree open; linked worktrees share refs and objects, so this is enough for `fetch`. With `worktrees = "all"` it runs once per distinct open worktree. Targets are sorted by path.
+
+**Chunks and scheduling.** A run starts up to `chunk_size` processes at once. The next chunk starts after all of them end, plus `chunk_delay_ms`. Before each chunk, workspaces that disappeared or changed directory since resolution are dropped; a target with none left is skipped. Runs never overlap: the next run is due `interval_ms` after the previous start, or right after a late run ends, which counts as a missed deadline. The first run waits a jitter of up to min(interval/10, 30 s). Background processes do not use `max_concurrency` slots, so a slow fetch never delays collectors.
+
+**Environment.** Same inherited defaults, then `env_allow`, then `env`, then `HERDR_TOKENS_JOB`, `HERDR_TOKENS_WORKTREE_DIR` (also the working directory) and `HERDR_TOKENS_WORKSPACE_IDS` (comma-separated). Stdout and stderr are discarded; status keeps exit code, duration and failure counts.
+
+**Triggering.** `run-job` starts every job now, `run-job --job NAME` one job; an unknown name exits 1. The "Run background jobs" action triggers every job. A trigger during a run schedules one extra run right after it; repeated triggers coalesce. `refresh` never triggers jobs. While Herdr is disconnected, running processes continue but no run or chunk starts; a pending trigger waits for the connection. `status --json` lists `background_jobs` with phase, last run counts and per-target exit codes and consecutive failures.
+
+**Reloads.** A reload that changes only `[[jobs]]` leaves collectors, generations and published tokens untouched. An unchanged job keeps running; a changed or removed job has its processes terminated (SIGTERM, then SIGKILL). `stop` terminates them within the shutdown budget.
+
+**Operational notes.**
+
+- Jobs inherit the runner's environment from when it started. If `SSH_AUTH_SOCK` is missing or stale, SSH fetches fail, and `status` shows every target failing. Restart the runner from a shell with the right environment: `stop`, wait until control reports `runner unavailable`, then `start --socket … --config-dir … --state-dir …` with the paths from `status --json` → `identity`.
+- Terminating `git fetch` on reload or stop can leave a lock file, for example `Unable to create '…/.git/shallow.lock': File exists` or a `*.lock` under `refs/`. Remove the stale lock by hand. Jobs are terminated only when they change or the runner stops, never on a disconnect or a workspace change.
+- A job runs the configured command as is, including commands that modify repositories such as `git pull`. What it does is your responsibility; see "This is not a sandbox" above. Choose `interval_ms`, `chunk_size` and `worktrees` for your load: `all` can run one command in several worktrees of the same repository at once, which compete for the same ref locks.
 
 ## Runtime state and recovery
 

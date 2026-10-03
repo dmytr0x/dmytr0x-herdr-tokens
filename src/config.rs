@@ -139,6 +139,45 @@ pub struct Collector {
     pub env_allow: Vec<String>,
     pub tokens: BTreeMap<String, TokenMapping>,
 }
+/// Which worktrees of a repository a background job runs in.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Worktrees {
+    /// Once per repository, in its main worktree (or bare repository directory).
+    #[default]
+    Main,
+    /// Once per distinct worktree open in a Herdr workspace.
+    All,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawJob {
+    name: String,
+    command: Vec<String>,
+    #[serde(default)]
+    worktrees: Worktrees,
+    interval_ms: Option<u64>,
+    timeout_ms: Option<u64>,
+    chunk_size: Option<usize>,
+    chunk_delay_ms: Option<u64>,
+    #[serde(default)]
+    env: BTreeMap<String, String>,
+    #[serde(default)]
+    env_allow: Vec<String>,
+}
+/// A periodic command run in the repositories of discovered workspaces. Publishes no tokens.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct Job {
+    pub name: String,
+    pub command: Vec<String>,
+    pub worktrees: Worktrees,
+    pub interval_ms: u64,
+    pub timeout_ms: u64,
+    pub chunk_size: usize,
+    pub chunk_delay_ms: u64,
+    pub env: BTreeMap<String, String>,
+    pub env_allow: Vec<String>,
+}
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Main {
@@ -149,18 +188,23 @@ struct Main {
     workspace_dirs: BTreeMap<String, PathBuf>,
     #[serde(default)]
     collectors: Vec<RawCollector>,
+    #[serde(default)]
+    jobs: Vec<RawJob>,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Fragment {
     #[serde(default)]
     collectors: Vec<RawCollector>,
+    #[serde(default)]
+    jobs: Vec<RawJob>,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct Config {
     pub runtime: Runtime,
     pub workspace_dirs: BTreeMap<String, PathBuf>,
     pub collectors: Vec<Collector>,
+    pub jobs: Vec<Job>,
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Snapshot {
@@ -266,7 +310,9 @@ impl Snapshot {
             "discovery interval outside 1000..60000"
         );
         for (_, bytes) in self.files.iter().skip(1) {
-            main.collectors.extend(parse::<Fragment>(bytes)?.collectors);
+            let fragment = parse::<Fragment>(bytes)?;
+            main.collectors.extend(fragment.collectors);
+            main.jobs.extend(fragment.jobs);
         }
         ensure!(
             main.workspace_dirs.values().all(|p| p.is_absolute()),
@@ -338,29 +384,12 @@ impl Snapshot {
                     "Git does not accept command/global/output/env/env_allow"
                 ),
                 Provider::Command => ensure!(
-                    raw.command.as_ref().is_some_and(|v| !v.is_empty()
-                        && !v[0].is_empty()
-                        && v.iter().all(|s| !s.contains('\0'))),
+                    raw.command.as_deref().is_some_and(valid_argv),
                     "command requires valid argv"
                 ),
             }
             let env = raw.env.unwrap_or_default();
-            let mut allow = raw.env_allow.unwrap_or_default();
-            let mut seen = BTreeSet::new();
-            for key in env.keys().chain(allow.iter()) {
-                ensure!(
-                    env_name(key) && !CONTEXT.contains(&key.as_str()),
-                    "invalid or reserved environment name"
-                );
-            }
-            ensure!(
-                env.values().all(|v| !v.contains('\0')),
-                "NUL in environment"
-            );
-            for key in &allow {
-                ensure!(seen.insert(key), "duplicate env_allow entry");
-            }
-            allow.sort();
+            let allow = environment(&env, raw.env_allow.unwrap_or_default())?;
             collectors.push(Collector {
                 name: raw.name,
                 provider: raw.provider,
@@ -377,17 +406,79 @@ impl Snapshot {
         }
         ensure!(tokens.len() <= 32, "configuration exceeds 32 tokens");
         collectors.sort_by(|a, b| a.name.cmp(&b.name));
+        ensure!(main.jobs.len() <= 16, "configuration exceeds 16 jobs");
+        let mut jobs = Vec::new();
+        for raw in main.jobs {
+            ensure!(
+                identifier(&raw.name, 64) && names.insert(raw.name.clone()),
+                "invalid or duplicate job name"
+            );
+            ensure!(valid_argv(&raw.command), "job command requires valid argv");
+            let interval = raw.interval_ms.unwrap_or(300_000);
+            ensure!(
+                (10_000..=86_400_000).contains(&interval),
+                "invalid job interval_ms"
+            );
+            let timeout = raw.timeout_ms.unwrap_or(interval.min(60_000));
+            ensure!(
+                (1..=interval.min(600_000)).contains(&timeout),
+                "invalid job timeout_ms"
+            );
+            let chunk_size = raw.chunk_size.unwrap_or(4);
+            ensure!((1..=16).contains(&chunk_size), "invalid job chunk_size");
+            let chunk_delay = raw.chunk_delay_ms.unwrap_or(0);
+            ensure!(chunk_delay <= interval, "invalid job chunk_delay_ms");
+            let allow = environment(&raw.env, raw.env_allow)?;
+            jobs.push(Job {
+                name: raw.name,
+                command: raw.command,
+                worktrees: raw.worktrees,
+                interval_ms: interval,
+                timeout_ms: timeout,
+                chunk_size,
+                chunk_delay_ms: chunk_delay,
+                env: raw.env,
+                env_allow: allow,
+            });
+        }
+        jobs.sort_by(|a, b| a.name.cmp(&b.name));
         Ok(Config {
             runtime: main.runtime,
             workspace_dirs: main.workspace_dirs,
             collectors,
+            jobs,
         })
     }
 }
-pub const CONTEXT: [&str; 3] = [
+fn valid_argv(argv: &[String]) -> bool {
+    !argv.is_empty() && !argv[0].is_empty() && argv.iter().all(|s| !s.contains('\0'))
+}
+/// Validates explicit and allowed environment names; returns the sorted allow-list.
+fn environment(env: &BTreeMap<String, String>, mut allow: Vec<String>) -> Result<Vec<String>> {
+    for key in env.keys().chain(allow.iter()) {
+        ensure!(
+            env_name(key) && !CONTEXT.contains(&key.as_str()),
+            "invalid or reserved environment name"
+        );
+    }
+    ensure!(
+        env.values().all(|v| !v.contains('\0')),
+        "NUL in environment"
+    );
+    let mut seen = BTreeSet::new();
+    for key in &allow {
+        ensure!(seen.insert(key), "duplicate env_allow entry");
+    }
+    allow.sort();
+    Ok(allow)
+}
+pub const CONTEXT: [&str; 6] = [
     "HERDR_TOKENS_WORKSPACE_ID",
     "HERDR_TOKENS_WORKSPACE_DIR",
     "HERDR_TOKENS_COLLECTOR",
+    "HERDR_TOKENS_JOB",
+    "HERDR_TOKENS_WORKTREE_DIR",
+    "HERDR_TOKENS_WORKSPACE_IDS",
 ];
 fn identifier(s: &str, max: usize) -> bool {
     !s.is_empty()
@@ -407,6 +498,13 @@ impl Config {
     }
     pub fn hash(&self) -> String {
         hash(&serde_json::to_vec(self).expect("config serialization"))
+    }
+    /// The configuration without background jobs, to detect job-only reloads.
+    pub fn without_jobs(&self) -> Self {
+        Self {
+            jobs: Vec::new(),
+            ..self.clone()
+        }
     }
     pub fn token_names(&self) -> BTreeSet<String> {
         self.collectors

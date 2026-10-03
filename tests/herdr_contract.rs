@@ -9,6 +9,7 @@ fn config() -> Config {
         runtime: Runtime::default(),
         workspace_dirs: BTreeMap::new(),
         collectors: vec![],
+        jobs: vec![],
     }
 }
 #[test]

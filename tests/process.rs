@@ -9,6 +9,7 @@ fn request(script: &str) -> Request {
         timeout: Duration::from_millis(150),
         stdout_limit: 1024,
         stderr_limit: 1024,
+        capture: process::Capture::Bounded,
     }
 }
 #[tokio::test]
