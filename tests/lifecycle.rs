@@ -1,14 +1,17 @@
+mod support;
 use serde_json::{Value, json};
 use std::{
+    cell::RefCell,
     fs,
     path::PathBuf,
     process::{Child, Command, Stdio},
     time::{Duration, Instant},
 };
+use support::git;
 struct Harness {
     _temp: tempfile::TempDir,
     root: PathBuf,
-    runner: Option<Child>,
+    runner: RefCell<Option<Child>>,
 }
 impl Harness {
     fn new() -> Self {
@@ -20,7 +23,7 @@ impl Harness {
         let h = Self {
             _temp: t,
             root,
-            runner: None,
+            runner: RefCell::new(None),
         };
         h.settings(json!({"workspaces":{"w1":h.root.join("w1"),"w2":h.root.join("w2")}}));
         h.config("old");
@@ -68,7 +71,7 @@ impl Harness {
     }
     fn spawn(&mut self) {
         let log = fs::File::create(self.root.join("runner.log")).unwrap();
-        self.runner = Some(
+        *self.runner.get_mut() = Some(
             self.cmd("run")
                 .stdout(Stdio::null())
                 .stderr(log)
@@ -94,6 +97,14 @@ impl Harness {
     fn wait(&self, condition: impl Fn(&Self) -> bool) {
         let until = Instant::now() + Duration::from_secs(10);
         while !condition(self) {
+            if let Some(runner) = self.runner.borrow_mut().as_mut()
+                && let Some(status) = runner.try_wait().expect("runner status")
+            {
+                panic!(
+                    "runner exited {status}; redacted log: {}",
+                    fs::read_to_string(self.root.join("runner.log")).unwrap_or_default()
+                );
+            }
             assert!(
                 Instant::now() < until,
                 "timed out; log: {}",
@@ -112,7 +123,7 @@ impl Harness {
     fn stop(&mut self) {
         let o = self.cmd("stop").output().unwrap();
         assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
-        if let Some(mut c) = self.runner.take() {
+        if let Some(mut c) = self.runner.get_mut().take() {
             assert!(c.wait().unwrap().success());
         }
     }
@@ -120,7 +131,7 @@ impl Harness {
 impl Drop for Harness {
     fn drop(&mut self) {
         let _ = self.cmd("stop").output();
-        if let Some(mut c) = self.runner.take() {
+        if let Some(mut c) = self.runner.get_mut().take() {
             let _ = c.kill();
             let _ = c.wait();
         }
@@ -580,7 +591,7 @@ fn newly_enabled_git_prerequisite_rejects_reload_without_mutation() {
     )
     .unwrap();
     let log = fs::File::create(h.root.join("runner.log")).unwrap();
-    h.runner = Some(
+    *h.runner.get_mut() = Some(
         h.cmd("run")
             .env("PATH", path)
             .stdout(Stdio::null())
@@ -670,24 +681,6 @@ fn cli_exit_codes_validate_never_executes_and_no_implicit_endpoint() {
     assert_eq!(h.cmd("status").output().unwrap().status.code(), Some(1));
 }
 
-fn git(dir: &std::path::Path, args: &[&str]) {
-    let out = Command::new("git")
-        .args(args)
-        .current_dir(dir)
-        .env("GIT_CONFIG_NOSYSTEM", "1")
-        .env("GIT_CONFIG_GLOBAL", "/dev/null")
-        .env("GIT_AUTHOR_NAME", "Test")
-        .env("GIT_AUTHOR_EMAIL", "test@example.invalid")
-        .env("GIT_COMMITTER_NAME", "Test")
-        .env("GIT_COMMITTER_EMAIL", "test@example.invalid")
-        .output()
-        .unwrap();
-    assert!(
-        out.status.success(),
-        "git {args:?}: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-}
 impl Harness {
     /// `repo` (main worktree, never opened) with `linked` open as w1; w2 stays a plain directory.
     fn worktrees(&self) {
@@ -869,6 +862,7 @@ fn run_job_triggers_idle_jobs_and_rejects_unknown_names() {
     // The manifest action runs `run-job` without arguments: every job is triggered.
     assert!(h.cmd("run-job").output().unwrap().status.success());
     h.wait(|h| h.lines("a.log").len() == 2 && h.lines("b.log").len() == 1);
+    h.wait(|h| h.background("a")["phase"] == "idle");
     assert!(h.background("a")["next_due_in_ms"].as_u64().unwrap() > 80_000_000);
     h.stop();
 }
@@ -970,4 +964,12 @@ fn workspace_changes_preserve_unrelated_inflight_collectors() {
     h.stop();
     assert!(stopped.elapsed() < Duration::from_secs(6));
     assert!(!alive(&h.root.join("changed/started")));
+}
+
+#[test]
+#[should_panic(expected = "runner exited")]
+fn startup_failure_is_reported_without_waiting_for_the_deadline() {
+    let mut h = Harness::new();
+    h.atomic("config/tokens.toml", "schema_version=99");
+    h.spawn();
 }

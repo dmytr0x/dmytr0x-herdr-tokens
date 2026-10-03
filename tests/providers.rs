@@ -1,8 +1,10 @@
+mod support;
 use herdr_tokens::{
     config::{CommandOutput, Config, Provider, TokenMapping},
     providers::{self, Token},
 };
 use std::{collections::BTreeMap, fs, path::Path, process::Command};
+use support::git;
 use tokio_util::sync::CancellationToken;
 // Mutable wire fixture; each invocation crosses the real validation boundary.
 #[derive(serde::Serialize)]
@@ -24,10 +26,16 @@ async fn collect(
     cwd: &Path,
     cancel: CancellationToken,
 ) -> Result<providers::Collected, providers::Error> {
-    let text = format!(
-        "schema_version=1\n[[collectors]]\n{}",
-        toml::to_string(c).unwrap()
-    );
+    #[derive(serde::Serialize)]
+    struct Wire<'a> {
+        schema_version: u32,
+        collectors: Vec<&'a Collector>,
+    }
+    let text = toml::to_string(&Wire {
+        schema_version: 1,
+        collectors: vec![c],
+    })
+    .unwrap();
     let config = Config::from_toml(&text).unwrap();
     providers::collect(&config.collectors()[0], workspace, cwd, cancel).await
 }
@@ -220,25 +228,7 @@ async fn strict_json_and_atomic_mapping() {
             .is_err()
     );
 }
-fn git(dir: &Path, args: &[&str]) {
-    let out = Command::new("git")
-        .args(args)
-        .current_dir(dir)
-        .env("GIT_CONFIG_NOSYSTEM", "1")
-        .env("GIT_CONFIG_GLOBAL", "/dev/null")
-        .env("GIT_AUTHOR_NAME", "Test")
-        .env("GIT_AUTHOR_EMAIL", "test@example.invalid")
-        .env("GIT_COMMITTER_NAME", "Test")
-        .env("GIT_COMMITTER_EMAIL", "test@example.invalid")
-        .output()
-        .unwrap();
-    assert!(
-        out.status.success(),
-        "git {:?}: {}",
-        args,
-        String::from_utf8_lossy(&out.stderr)
-    );
-}
+
 fn git_collector() -> Collector {
     let mut c = collector(String::new());
     c.provider = Provider::Git;

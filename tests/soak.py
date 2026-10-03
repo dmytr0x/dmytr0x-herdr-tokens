@@ -8,6 +8,7 @@ import statistics
 import subprocess
 import tempfile
 import time
+from harness_support import cleanup_all, terminate
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--seconds', type=int, default=600)
@@ -83,13 +84,11 @@ token{i}="status"
         if args.output:
             args.output.write_text(json.dumps({'summary': summary, 'samples': samples}, indent=2) + '\n')
     finally:
-        subprocess.run([str(binary), 'stop', *common], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=6)
-        try:
-            runner.wait(timeout=6)
-        except subprocess.TimeoutExpired:
-            runner.kill()
-            runner.wait()
-        log.close()
+        cleanup_all(
+            lambda: subprocess.run([str(binary), 'stop', *common], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=6),
+            lambda: terminate(runner),
+            log.close,
+        )
         # No child of the runner (including shell descendants) may retain the fixture path.
         processes = subprocess.check_output(['ps', '-axo', 'command=']).decode()
         assert str(root) not in processes, 'process leaked after shutdown'

@@ -73,6 +73,7 @@ async fn process_group_descendants_do_not_survive_cleanup() {
 async fn explicit_environment_and_cwd() {
     let t = tempfile::tempdir().unwrap();
     let mut r = request("printf '%s|%s|%s' \"$PWD\" \"$ONLY\" \"${HERDR_SOCKET_PATH-unset}\"");
+    r.timeout = Duration::from_secs(2);
     r.cwd = t.path().canonicalize().unwrap();
     r.env
         .insert(OsString::from("ONLY"), OsString::from("allowed"));

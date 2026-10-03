@@ -5,10 +5,12 @@ import json
 import os
 from pathlib import Path
 import shutil
-import signal
 import subprocess
 import tempfile
 import time
+from collections.abc import Callable
+from typing import Any
+from harness_support import cleanup_all, terminate
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--herdr', default=shutil.which('herdr'))
@@ -20,7 +22,7 @@ binary = (ROOT / args.binary).resolve()
 assert args.herdr and binary.is_file(), 'Build release binary and install Herdr first'
 
 
-def wait(predicate, seconds=10):
+def wait(predicate: Callable[[], object], seconds: float = 10) -> None:
     end = time.monotonic() + seconds
     while time.monotonic() < end:
         if predicate():
@@ -44,15 +46,15 @@ with tempfile.TemporaryDirectory(prefix='ht-real-', dir='/tmp') as tmp:
         subprocess.run(['git', 'init', '-q', str(repo)], env=env, check=True)
         for i in range(number):
             (repo / f'file{i}').write_text('untracked')
-    def herdr(*cmd, check=True):
+    def herdr(*cmd: str, check: bool = True) -> subprocess.CompletedProcess[bytes]:
         return subprocess.run([args.herdr, *cmd], env=env, capture_output=True, check=check, timeout=5)
-    def tokens(*cmd, check=True):
+    def tokens(*cmd: str, check: bool = True) -> subprocess.CompletedProcess[bytes]:
         return subprocess.run([str(binary), *cmd, '--config-dir', str(config), '--state-dir', str(root / 'state'),
                                '--runtime-dir', str(root / 'runtime'), '--socket', str(root / 'api.sock'),
                                '--herdr-bin', args.herdr], env=env, capture_output=True, check=check, timeout=7)
-    def status():
+    def status() -> dict[str, Any]:
         return json.loads(tokens('status', '--json', '--include-values').stdout)['result']
-    def configure(token='command_value', broken=False):
+    def configure(token: str = 'command_value', broken: bool = False) -> None:
         argv = ['/bin/sh', '-c', 'sleep 10' if broken else 'printf \'{"status":"same"}\'']
         text = f'''schema_version=1
 [runtime]
@@ -78,6 +80,17 @@ ttl_ms=1500
         path = config / 'tokens.toml'
         path.with_suffix('.tmp').write_text(text)
         path.with_suffix('.tmp').replace(path)
+    runners: list[subprocess.Popen] = []
+    def start_runner() -> None:
+        runner_log = (root / 'runner.log').open('a')
+        try:
+            runner = subprocess.Popen([str(binary), 'run', '--config-dir', str(config), '--state-dir', str(root / 'state'),
+                                       '--runtime-dir', str(root / 'runtime'), '--socket', str(root / 'api.sock'),
+                                       '--herdr-bin', args.herdr], env=env, stdout=runner_log, stderr=runner_log)
+            runners.append(runner)
+        finally:
+            runner_log.close()
+        wait(lambda: tokens('status', check=False).returncode == 0)
     configure()
     log = (root / 'server.log').open('w+')
     server = subprocess.Popen([args.herdr, 'server'], env=env, stdout=log, stderr=log, start_new_session=True)
@@ -95,7 +108,7 @@ ttl_ms=1500
         w = workspace_ids[0]
         good = herdr('workspace', 'report-metadata', w, '--source', 'contract-test', '--seq', '2', '--ttl-ms', '600', '--token', 'contract=first')
         assert good.stdout == b''
-        def metadata():
+        def metadata() -> dict[str, str]:
             info = json.loads(herdr('workspace', 'get', w).stdout)
             return info['result']['workspace'].get('tokens', {})
         assert metadata()['contract'] == 'first'
@@ -116,6 +129,7 @@ ttl_ms=1500
                                ('report-success.stdout', good.stdout), ('workspace-not-found.stderr.json', error.stderr)]:
                 (fixtures / name).write_bytes(data.replace(str(root).encode(), b'/fixture'))
         tokens('validate')
+        start_runner()
         tokens('start')
         tokens('start')
         wait(lambda: len(status()['jobs']) == 4 and all(j['diagnostics']['last_acknowledgement_age_ms'] is not None for j in status()['jobs']))
@@ -145,7 +159,7 @@ ttl_ms=1500
         wait(lambda: metadata().get('replacement') == 'repaired')
         tokens('stop')
         wait(lambda: tokens('status', check=False).returncode != 0)
-        tokens('start')
+        start_runner()
         wait(lambda: metadata().get('replacement') == 'repaired')
         # Keep the emitter alive while restarting only the isolated Herdr server.
         herdr('server', 'stop')
@@ -162,7 +176,7 @@ ttl_ms=1500
         wait(lambda: tokens('status', check=False).returncode != 0)
         plugin_config = Path(herdr('plugin', 'config-dir', 'dmytr0x-herdr-tokens').stdout.decode().strip())
         (plugin_config / 'tokens.toml').write_text('schema_version=1\n')
-        def action_status():
+        def action_status() -> subprocess.CompletedProcess[bytes]:
             return subprocess.run([str(binary), 'status', '--json', '--socket', str(root / 'api.sock')],
                                   env=env, capture_output=True, timeout=6)
         herdr('plugin', 'action', 'invoke', 'dmytr0x-herdr-tokens.start')
@@ -176,11 +190,11 @@ ttl_ms=1500
         wait(lambda: action_status().returncode != 0)
         print('PASS: isolated Herdr 0.9.1 contract, manifest actions and two-workspace acceptance checks')
     finally:
-        subprocess.run([str(binary), 'stop', '--socket', str(root / 'api.sock')], env=env, capture_output=True, timeout=6)
-        tokens('stop', check=False)
-        herdr('server', 'stop', check=False)
-        try:
-            server.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            os.killpg(server.pid, signal.SIGTERM)
-            server.wait(timeout=5)
+        cleanup_all(
+            lambda: subprocess.run([str(binary), 'stop', '--socket', str(root / 'api.sock')], env=env, capture_output=True, timeout=6),
+            lambda: tokens('stop', check=False),
+            *(lambda runner=runner: terminate(runner) for runner in runners),
+            lambda: herdr('server', 'stop', check=False),
+            lambda: terminate(server, group=True),
+            log.close,
+        )

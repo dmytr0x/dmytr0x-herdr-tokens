@@ -1,25 +1,9 @@
+#[path = "../../../tests/support/mod.rs"]
+mod support;
 use super::*;
 use crate::herdr::Directory;
-use std::{fs, path::Path, process::Command};
-
-fn git(dir: &Path, args: &[&str]) {
-    let out = Command::new("git")
-        .args(args)
-        .current_dir(dir)
-        .env("GIT_CONFIG_NOSYSTEM", "1")
-        .env("GIT_CONFIG_GLOBAL", "/dev/null")
-        .env("GIT_AUTHOR_NAME", "Test")
-        .env("GIT_AUTHOR_EMAIL", "test@example.invalid")
-        .env("GIT_COMMITTER_NAME", "Test")
-        .env("GIT_COMMITTER_EMAIL", "test@example.invalid")
-        .output()
-        .unwrap();
-    assert!(
-        out.status.success(),
-        "git {args:?}: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-}
+use std::{fs, path::Path};
+use support::git;
 
 /// Creates `root/main` with a commit and a linked worktree at `root/linked`.
 fn repo(root: &Path) -> (PathBuf, PathBuf) {
