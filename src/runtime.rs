@@ -5,7 +5,6 @@ use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use std::{
     fs::{self, File, OpenOptions},
-    io::{Read, Write},
     os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt},
     path::{Component, Path, PathBuf},
 };
@@ -87,8 +86,9 @@ impl Endpoint {
             .create(true)
             .truncate(false)
             .mode(0o600)
-            .custom_flags(nix::libc::O_NOFOLLOW)
+            .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_NONBLOCK)
             .open(path)?;
+        managed_file(&file)?;
         match file.try_lock_exclusive() {
             Ok(()) => Ok(Some(Lock {
                 file,
@@ -98,7 +98,8 @@ impl Endpoint {
             Err(e) => Err(e.into()),
         }
     }
-    pub fn bind(&self, _lock: &Lock) -> Result<UnixListener> {
+    pub fn bind(&self, lock: &Lock) -> Result<UnixListener> {
+        ensure!(lock.control == self.control, "endpoint lock mismatch");
         managed(&self.control, true)?;
         if self.control.exists() {
             fs::remove_file(&self.control)?;
@@ -117,6 +118,16 @@ impl Drop for Lock {
         let _ = fs::remove_file(&self.control);
         let _ = FileExt::unlock(&self.file);
     }
+}
+pub(crate) fn managed_file(file: &File) -> Result<()> {
+    let metadata = file.metadata()?;
+    ensure!(
+        metadata.is_file()
+            && metadata.uid() == nix::unistd::getuid().as_raw()
+            && metadata.mode() & 0o077 == 0,
+        "unsafe opened runtime/state file"
+    );
+    Ok(())
 }
 fn managed(path: &Path, socket: bool) -> Result<()> {
     use std::os::unix::fs::FileTypeExt;
@@ -183,65 +194,7 @@ pub fn state_dir(identity: &Identity) -> Result<PathBuf> {
     private_dir(&dir)?;
     Ok(dir)
 }
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Watermark {
-    schema_version: u32,
-    reserved_through: u64,
-}
-pub struct Sequences {
-    dir: PathBuf,
-    next: u64,
-    through: u64,
-}
-impl Sequences {
-    /// Caller must hold the endpoint lock for the allocator's entire lifetime.
-    pub fn open(dir: PathBuf, _lock: &Lock) -> Result<Self> {
-        let path = dir.join("sequence.toml");
-        managed(&path, false)?;
-        let through = match File::open(path) {
-            Ok(f) => {
-                let mut text = String::new();
-                f.take(4097).read_to_string(&mut text)?;
-                ensure!(text.len() <= 4096, "sequence state oversized");
-                let w: Watermark = toml::from_str(&text)
-                    .context("corrupt sequence state; do not reset while Herdr retains history")?;
-                ensure!(w.schema_version == 1, "unsupported sequence schema");
-                w.reserved_through
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => 0,
-            Err(e) => return Err(e.into()),
-        };
-        let mut result = Self {
-            dir,
-            next: through,
-            through,
-        };
-        result.reserve()?;
-        Ok(result)
-    }
-    fn reserve(&mut self) -> Result<()> {
-        let end = self
-            .through
-            .checked_add(1024)
-            .context("sequence range exhausted")?;
-        let mut temp = tempfile::NamedTempFile::new_in(&self.dir)?;
-        write!(temp, "schema_version = 1\nreserved_through = {end}\n")?;
-        temp.as_file().sync_all()?;
-        temp.persist(self.dir.join("sequence.toml"))?;
-        File::open(&self.dir)?.sync_all()?;
-        self.next = self.through + 1;
-        self.through = end;
-        Ok(())
-    }
-    pub fn allocate(&mut self) -> Result<u64> {
-        if self.next > self.through {
-            self.reserve()?;
-        }
-        let n = self.next;
-        self.next = n.checked_add(1).context("sequence range exhausted")?;
-        Ok(n)
-    }
-}
+mod sequences;
+pub use sequences::Sequences;
 mod protocol;
 pub use protocol::{Command, Control, ProtocolError, Request, Response, matching, request, serve};

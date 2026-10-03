@@ -173,8 +173,9 @@ impl Write for Writer {
                 .append(true)
                 .create(true)
                 .mode(0o600)
-                .custom_flags(nix::libc::O_NOFOLLOW)
+                .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_NONBLOCK)
                 .open(log.dir.join(format!("day-{day:08}.jsonl")))?;
+            crate::runtime::managed_file(&file).map_err(io::Error::other)?;
             log.bytes = file.metadata()?.len();
             log.file = Some(file);
             log.day = day;

@@ -50,7 +50,7 @@ struct Report {
     seq: u64,
     task: OwnedTask<Result<(), herdr::Error>>,
 }
-struct Coordinator {
+struct Coordinator<'a> {
     identity: Identity,
     herdr: Herdr,
     config: Config,
@@ -66,7 +66,7 @@ struct Coordinator {
     background: BTreeMap<String, BackgroundJob>,
     publisher: Publisher,
     report_errors: BTreeMap<String, (String, u64)>,
-    sequences: Sequences,
+    sequences: Sequences<'a>,
     report: Option<Report>,
     discovery: Option<OwnedTask<Result<Discovery, herdr::Error>>>,
     discover_due: Instant,
@@ -91,7 +91,7 @@ fn current(
             .is_some_and(|w| w.generation == candidate.directory)
         && (jobs.contains_key(key) || globals.contains_key(&key.collector))
 }
-impl Coordinator {
+impl Coordinator<'_> {
     fn generation(&self, key: &Key) -> Generation {
         Generation {
             config: self.config_generation,
@@ -827,7 +827,7 @@ pub async fn run(
     herdr: Herdr,
     detached: bool,
 ) -> Result<()> {
-    let lock = match endpoint.acquire()? {
+    let mut lock = match endpoint.acquire()? {
         Some(lock) => lock,
         None => {
             let deadline = Instant::now() + Duration::from_secs(5);
@@ -852,8 +852,8 @@ pub async fn run(
         Snapshot::read(&identity.config)? == snapshot,
         "configuration changed during startup; retry"
     );
-    let sequences = Sequences::open(state, &lock)?;
     let listener = endpoint.bind(&lock)?;
+    let sequences = Sequences::open(state, &mut lock)?;
     let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
     let mut interrupt = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
     let (tx, mut rx) = mpsc::channel(32);
@@ -920,6 +920,7 @@ pub async fn run(
     c.shutdown().await;
     control_cancel.cancel();
     let _ = control_task.await;
+    drop(c);
     drop(lock);
     result
 }

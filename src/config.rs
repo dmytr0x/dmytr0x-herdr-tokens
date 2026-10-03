@@ -331,11 +331,15 @@ impl Snapshot {
         for (index, name) in names.into_iter().enumerate() {
             let read_path = config_file_path(&name, index == 0)?;
             let mut bytes = Vec::new();
-            fs::OpenOptions::new()
+            let file = fs::OpenOptions::new()
                 .read(true)
-                .custom_flags(nix::libc::O_NOFOLLOW)
-                .open(read_path)?
-                .take((1_048_577 - total) as u64)
+                .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_NONBLOCK)
+                .open(read_path)?;
+            ensure!(
+                file.metadata()?.is_file(),
+                "opened configuration is not a regular file"
+            );
+            file.take((1_048_577 - total) as u64)
                 .read_to_end(&mut bytes)?;
             total += bytes.len();
             ensure!(total <= 1_048_576, "configuration exceeds 1 MiB");

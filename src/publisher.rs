@@ -177,8 +177,9 @@ impl Publisher {
     pub fn sending(&mut self, send: &Publication) {
         if send.job.is_some() {
             // Request execution can delay server acceptance by the full adapter deadline.
-            let until =
-                Instant::now() + Duration::from_millis(send.ttl_ms) + Duration::from_millis(1100);
+            let until = Instant::now()
+                + Duration::from_millis(send.ttl_ms)
+                + crate::process::DELIVERY_BOUND;
             self.expiry
                 .entry(send.workspace.clone())
                 .and_modify(|t| *t = (*t).max(until))

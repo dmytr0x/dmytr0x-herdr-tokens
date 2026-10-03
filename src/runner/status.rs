@@ -63,7 +63,7 @@ struct Status<'a> {
     background_jobs: Vec<super::background::BackgroundObservations<'a>>,
     knowledge: &'static str,
 }
-impl Coordinator {
+impl Coordinator<'_> {
     pub(super) fn status(&self, values: bool) -> Value {
         let workspaces = self
             .workspaces

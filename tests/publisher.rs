@@ -40,7 +40,11 @@ async fn unacknowledged_clear_expires_after_possible_delivery_deadline() {
     publisher.sending(&publication);
     publisher.clear("w1", BTreeSet::from(["token".into()]));
     assert!(publisher.next(|_, _| true).0.unwrap().job.is_none());
-    tokio::time::advance(Duration::from_millis(4000)).await;
+    tokio::time::advance(
+        Duration::from_millis(3000) + herdr_tokens::process::DELIVERY_BOUND
+            - Duration::from_millis(100),
+    )
+    .await;
     assert!(publisher.next(|_, _| true).0.unwrap().job.is_none());
     publisher.put(pending("w1", "a", "new"));
     tokio::time::advance(Duration::from_millis(101)).await;
