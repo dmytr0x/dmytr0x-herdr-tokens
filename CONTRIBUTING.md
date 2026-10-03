@@ -47,8 +47,8 @@ See [compatibility and qualification](docs/compatibility.md) for acceptance comm
 Keep the versions in `Cargo.toml` and `herdr-plugin.toml` identical. After the commit passes CI, create and push the matching tag:
 
 ```sh
-git tag v0.1.0
-git push origin v0.1.0
+git tag v0.2.0
+git push origin v0.2.0
 ```
 
 The release workflow rejects a tag that is not exactly `v<manifest-version>`. It builds archives for macOS and Linux on x86-64 and ARM64, generates `SHA256SUMS`, and creates the GitHub Release. Re-running the workflow replaces assets on an existing release. Do not move a published version tag to different source; publish a new version instead.
