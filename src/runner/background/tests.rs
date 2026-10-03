@@ -333,3 +333,42 @@ async fn late_runs_count_missed_deadlines_and_reschedule_now() {
     assert_eq!(on_time.status.missed_deadlines, 0);
     assert!(on_time.due >= started + Duration::from_millis(60_000));
 }
+
+#[tokio::test]
+async fn resolver_panic_retains_diagnostics_and_counts_failure() {
+    let mut job = BackgroundJob::new(job("exit 0", Worktrees::Main, 4), 1);
+    job.status
+        .targets
+        .insert(PathBuf::from("/previous"), TargetStatus::default());
+    job.start(&BTreeMap::new());
+    let run = job.run.as_mut().unwrap();
+    run.resolve.take().unwrap().await.unwrap();
+    run.resolve = Some(tokio::spawn(async { panic!("injected resolver failure") }));
+    job.resolved("test").await;
+    job.finish();
+    assert_eq!(job.status.last_run.as_ref().unwrap().failed, 1);
+    assert_eq!(
+        job.status.targets[&PathBuf::from("/previous")]
+            .error
+            .as_deref(),
+        Some("resolver task failed")
+    );
+}
+
+#[tokio::test]
+async fn cancelled_resolution_is_failed_not_skipped() {
+    let dir = tempfile::tempdir().unwrap();
+    let cancel = CancellationToken::new();
+    cancel.cancel();
+    let result = resolve(
+        vec![("a".into(), dir.path().into(), 1)],
+        Worktrees::All,
+        cancel,
+    )
+    .await;
+    assert_eq!(result.skipped, 0);
+    assert_eq!(
+        result.targets[0].error.as_deref(),
+        Some("process cancelled")
+    );
+}

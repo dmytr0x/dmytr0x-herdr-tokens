@@ -47,25 +47,30 @@ pub(super) async fn resolve(
     // Keyed by common dir in `main` mode and by toplevel in `all` mode.
     let mut groups: BTreeMap<PathBuf, BTreeMap<String, u64>> = BTreeMap::new();
     let mut skipped = 0;
+    let mut targets = Vec::new();
     for (dir, ids) in by_dir {
         match providers::resolve_worktree(&dir, cancel.clone()).await {
-            Some((toplevel, common)) => {
+            Ok(providers::WorktreeResolution::Repository { toplevel, common }) => {
                 let key = match mode {
                     Worktrees::Main => common,
                     Worktrees::All => toplevel,
                 };
                 groups.entry(key).or_default().extend(ids);
             }
-            None => skipped += ids.len() as u64,
+            Ok(providers::WorktreeResolution::NotRepository) => skipped += ids.len() as u64,
+            Err(error) => targets.push(Target {
+                dir,
+                workspaces: ids,
+                error: Some(error.to_string()),
+            }),
         }
     }
-    let mut targets = Vec::new();
     for (key, workspaces) in groups {
         let (dir, error) = match mode {
             Worktrees::All => (key, None),
             Worktrees::Main => match providers::main_worktree(&key, cancel.clone()).await {
-                Some(dir) => (dir, None),
-                None => (key, Some("main worktree unavailable".to_owned())),
+                Ok(dir) => (dir, None),
+                Err(error) => (key, Some(error.to_string())),
             },
         };
         targets.push(Target {
@@ -241,12 +246,25 @@ impl BackgroundJob {
             job, status, run, ..
         } = self;
         let run = run.as_mut().expect("active run");
-        let resolution = run
-            .resolve
-            .take()
-            .expect("resolution")
-            .await
-            .unwrap_or_default();
+        let resolution = match run.resolve.take().expect("resolution").await {
+            Ok(resolution) => resolution,
+            Err(_) => {
+                // Preserve the previous target diagnostics: discovery did not succeed.
+                run.failed += 1;
+                for target in status.targets.values_mut() {
+                    record(
+                        target,
+                        None,
+                        None,
+                        Some("resolver task failed".into()),
+                        &job.name,
+                        endpoint,
+                    );
+                }
+                tracing::warn!(endpoint, job = %job.name, "resolver task failed");
+                return;
+            }
+        };
         run.targets = resolution.targets.len() as u64;
         run.skipped += resolution.skipped;
         let mut old = std::mem::take(&mut status.targets);

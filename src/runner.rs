@@ -142,7 +142,7 @@ impl Coordinator {
         let Some(report) = self.report.take() else {
             return Ok(());
         };
-        let result = report.task.await.unwrap_or(Err(herdr::Error::Connection));
+        let result = report.task.await.unwrap_or(Err(herdr::Error::Task));
         if result.is_ok() {
             self.publisher.acknowledged(&report.send);
             self.report_errors.remove(&report.send.workspace);
@@ -494,7 +494,7 @@ impl Coordinator {
         }
         if self.discovery.as_ref().is_some_and(JoinHandle::is_finished) {
             let discovery = self.discovery.take().expect("discovery");
-            match discovery.await.unwrap_or(Err(herdr::Error::Connection)) {
+            match discovery.await.unwrap_or(Err(herdr::Error::Task)) {
                 Ok(snapshot) => {
                     self.reconcile(snapshot).await?;
                     self.discover_due = Instant::now()

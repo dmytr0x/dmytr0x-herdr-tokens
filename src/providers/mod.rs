@@ -96,9 +96,29 @@ fn command_env(allow: &[String], vars: &BTreeMap<String, String>) -> BTreeMap<Os
     }
     env
 }
-/// Runs hardened read-only Git; `None` on any failure.
-async fn git(args: &[&str], cwd: &Path, cancel: CancellationToken) -> Option<Vec<u8>> {
-    let out = process::execute(
+/// Safe categories only: Git stderr and command arguments never leave this boundary.
+#[derive(Debug, thiserror::Error)]
+pub enum ResolutionError {
+    #[error(transparent)]
+    Process(#[from] process::Error),
+    #[error("Git invocation failed")]
+    Git,
+    #[error("malformed Git response")]
+    Malformed,
+    #[error("repository path unavailable")]
+    UnavailablePath,
+}
+#[derive(Debug, PartialEq, Eq)]
+pub enum WorktreeResolution {
+    NotRepository,
+    Repository { toplevel: PathBuf, common: PathBuf },
+}
+async fn git(
+    args: &[&str],
+    cwd: &Path,
+    cancel: CancellationToken,
+) -> Result<process::Output, ResolutionError> {
+    Ok(process::execute(
         Request {
             argv: GIT.iter().chain(args).map(OsString::from).collect(),
             cwd: cwd.into(),
@@ -110,47 +130,89 @@ async fn git(args: &[&str], cwd: &Path, cancel: CancellationToken) -> Option<Vec
         },
         cancel,
     )
-    .await
-    .ok()?;
-    out.status.success().then_some(out.stdout)
+    .await?)
 }
-fn line_path(line: &[u8], base: &Path) -> Option<PathBuf> {
-    if line.is_empty() {
-        return None;
+fn successful(out: process::Output) -> Result<Vec<u8>, ResolutionError> {
+    if out.status.success() {
+        Ok(out.stdout)
+    } else {
+        Err(ResolutionError::Git)
     }
-    base.join(OsStr::from_bytes(line)).canonicalize().ok()
 }
-/// Returns canonical `(toplevel, common_dir)` for the work tree containing `dir`,
-/// or `None` when `dir` is not inside a Git work tree.
-pub async fn resolve_worktree(dir: &Path, cancel: CancellationToken) -> Option<(PathBuf, PathBuf)> {
-    let toplevel = git(&["rev-parse", "--show-toplevel"], dir, cancel.clone()).await?;
-    let common = git(&["rev-parse", "--git-common-dir"], dir, cancel).await?;
-    Some((
-        line_path(toplevel.strip_suffix(b"\n")?, dir)?,
-        line_path(common.strip_suffix(b"\n")?, dir)?,
-    ))
+fn line_path(line: &[u8], base: &Path) -> Result<PathBuf, ResolutionError> {
+    if line.is_empty() || line.contains(&0) {
+        return Err(ResolutionError::Malformed);
+    }
+    let path = base
+        .join(OsStr::from_bytes(line))
+        .canonicalize()
+        .map_err(|_| ResolutionError::UnavailablePath)?;
+    if !path.is_dir() {
+        return Err(ResolutionError::UnavailablePath);
+    }
+    Ok(path)
 }
-/// Returns the canonical main worktree (or bare repository) path for `common_dir`,
-/// or `None` when Git cannot list it or the path no longer exists.
-pub async fn main_worktree(common_dir: &Path, cancel: CancellationToken) -> Option<PathBuf> {
-    let first = if let Some(out) = git(
+pub async fn resolve_worktree(
+    dir: &Path,
+    cancel: CancellationToken,
+) -> Result<WorktreeResolution, ResolutionError> {
+    if cancel.is_cancelled() {
+        return Err(process::Error::Cancelled.into());
+    }
+    if !dir.is_dir() {
+        return Err(ResolutionError::UnavailablePath);
+    }
+    let out = git(&["rev-parse", "--show-toplevel"], dir, cancel.clone()).await?;
+    if !out.status.success() && out.stderr.starts_with(b"fatal: not a git repository") {
+        return Ok(WorktreeResolution::NotRepository);
+    }
+    let toplevel = successful(out)?;
+    let common = successful(git(&["rev-parse", "--git-common-dir"], dir, cancel).await?)?;
+    Ok(WorktreeResolution::Repository {
+        toplevel: line_path(
+            toplevel
+                .strip_suffix(b"\n")
+                .ok_or(ResolutionError::Malformed)?,
+            dir,
+        )?,
+        common: line_path(
+            common
+                .strip_suffix(b"\n")
+                .ok_or(ResolutionError::Malformed)?,
+            dir,
+        )?,
+    })
+}
+pub async fn main_worktree(
+    common_dir: &Path,
+    cancel: CancellationToken,
+) -> Result<PathBuf, ResolutionError> {
+    let out = git(
         &["worktree", "list", "--porcelain", "-z"],
         common_dir,
         cancel.clone(),
     )
-    .await
-    {
-        out.split(|&b| b == b'\0').next()?.to_vec()
+    .await?;
+    let first = if out.status.success() {
+        out.stdout
+            .split(|&b| b == 0)
+            .next()
+            .ok_or(ResolutionError::Malformed)?
+            .to_vec()
     } else {
-        // `-z` needs Git 2.36; the preflight only guarantees 2.20.
-        let out = git(&["worktree", "list", "--porcelain"], common_dir, cancel).await?;
+        let out = successful(git(&["worktree", "list", "--porcelain"], common_dir, cancel).await?)?;
         let end = out
             .windows(b"\nHEAD ".len())
-            .position(|w| w == b"\nHEAD ")?;
+            .position(|w| w == b"\nHEAD ")
+            .ok_or(ResolutionError::Malformed)?;
         out[..end].to_vec()
     };
-    let path = line_path(first.strip_prefix(b"worktree ")?, common_dir)?;
-    path.is_dir().then_some(path)
+    line_path(
+        first
+            .strip_prefix(b"worktree ")
+            .ok_or(ResolutionError::Malformed)?,
+        common_dir,
+    )
 }
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct JobOutcome {

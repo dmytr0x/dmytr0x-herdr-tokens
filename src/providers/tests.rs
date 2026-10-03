@@ -119,3 +119,40 @@ fn text_removes_terminal_sequences_and_rejects_invalid_utf8() {
         .is_err()
     );
 }
+
+#[tokio::test]
+async fn resolution_distinguishes_absence_cancellation_and_unavailable_paths() {
+    let dir = tempfile::tempdir().unwrap();
+    assert_eq!(
+        resolve_worktree(dir.path(), CancellationToken::new())
+            .await
+            .unwrap(),
+        WorktreeResolution::NotRepository
+    );
+    assert!(matches!(
+        resolve_worktree(&dir.path().join("missing"), CancellationToken::new()).await,
+        Err(ResolutionError::UnavailablePath)
+    ));
+    let cancel = CancellationToken::new();
+    cancel.cancel();
+    assert!(matches!(
+        resolve_worktree(dir.path(), cancel).await,
+        Err(ResolutionError::Process(process::Error::Cancelled))
+    ));
+    assert!(matches!(
+        line_path(b"", dir.path()),
+        Err(ResolutionError::Malformed)
+    ));
+    assert!(matches!(
+        line_path(b"missing", dir.path()),
+        Err(ResolutionError::UnavailablePath)
+    ));
+    for error in [
+        process::Error::Io,
+        process::Error::Timeout,
+        process::Error::Cancelled,
+    ] {
+        let message = error.to_string();
+        assert_eq!(ResolutionError::from(error).to_string(), message);
+    }
+}

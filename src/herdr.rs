@@ -19,6 +19,8 @@ pub struct Herdr {
 }
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
+    #[error("Herdr task failed (delivery unknown)")]
+    Task,
     #[error("Herdr connection failure")]
     Connection,
     #[error("Herdr request timed out (delivery unknown)")]
