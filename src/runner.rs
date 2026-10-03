@@ -2,6 +2,7 @@
 mod background;
 mod job;
 mod planning;
+mod status;
 use crate::task::OwnedTask;
 use crate::{
     config::{Config, Snapshot},
@@ -9,13 +10,13 @@ use crate::{
     herdr::{self, Directory, Discovery, Herdr},
     providers,
     publisher::{Generation, Key, Pending, Publication, Publisher},
-    runtime::{self, Control, Endpoint, Identity, Response, Sequences},
+    runtime::{self, Command, Control, Endpoint, Identity, Response, Sequences},
 };
 use anyhow::Result;
 use background::BackgroundJob;
 use job::{CollectorTask, jitter};
 use planning::{Candidate, ReloadPlan, WorkspaceDiff};
-use serde_json::{Value, json};
+use serde_json::Value;
 use std::{
     collections::{BTreeMap, BTreeSet},
     time::Duration,
@@ -32,6 +33,17 @@ enum ConnectionState {
 struct Workspace {
     directory: Directory,
     generation: u64,
+}
+#[derive(serde::Serialize)]
+#[serde(untagged)]
+enum ControlResult {
+    Ping { version: &'static str },
+    Scheduled { scheduled: bool },
+    Reloaded { accepted: bool, changed: bool },
+    Rejected { accepted: bool, error: String },
+    Error { error: &'static str },
+    Stopping { stopping: bool },
+    Status(Value),
 }
 struct Report {
     send: Publication,
@@ -710,79 +722,57 @@ impl Coordinator {
         }
         Ok(())
     }
-    fn status(&self, values: bool) -> Value {
-        let workspaces: BTreeMap<_,_> = self.workspaces.iter().map(|(id,w)| (id, json!({"directory": w.directory, "generation": w.generation, "pending_clears": self.publisher.pending_clears(id), "publication_error": self.report_errors.get(id)}))).collect();
-        let mut jobs: Vec<_> = self.jobs.iter().map(|(key,j)| json!({
-            "workspace": key.workspace, "global": false, "collector": key.collector, "tokens": j.collector.tokens.keys().collect::<Vec<_>>(),
-            "running": j.task.is_some(), "queued": j.due <= Instant::now(), "refresh_pending": j.refresh,
-            "publication_pending": self.publisher.has_pending(key),
-            "next_due_in_ms": j.due.saturating_duration_since(Instant::now()).as_millis() as u64,
-            "diagnostics": j.status.json(values, j.collector.ttl_ms),
-        })).collect();
-        jobs.extend(self.global_jobs.iter().map(|(name, job)| {
-            let publication_pending = self.workspaces.keys().any(|workspace| {
-                self.publisher
-                    .has_pending(&Key::new(workspace.clone(), name.clone()))
-            });
-            json!({
-                "workspace": Value::Null, "global": true, "collector": name,
-                "tokens": job.collector.tokens.keys().collect::<Vec<_>>(),
-                "running": job.task.is_some(), "queued": job.due <= Instant::now(), "refresh_pending": job.refresh,
-                "publication_pending": publication_pending,
-                "next_due_in_ms": job.due.saturating_duration_since(Instant::now()).as_millis() as u64,
-                "diagnostics": job.status.json(values, job.collector.ttl_ms),
-            })
-        }));
-        json!({"version": env!("CARGO_PKG_VERSION"), "endpoint": self.identity.endpoint, "source": "herdr-tokens", "uptime_ms": self.started.elapsed().as_millis() as u64,
-            "config_hash": self.config.hash(), "config_files_hash": self.candidate.observed, "config_generation": self.config_generation,
-            "rejected_candidates": self.rejected_generation, "last_rejected_error": self.rejected, "connection": self.connection,
-            "connection_generation": self.connection_generation, "discovery_error": self.discovery_error, "workspaces": workspaces, "jobs": jobs,
-            "background_jobs": self.background.values().map(BackgroundJob::json).collect::<Vec<_>>(),
-            "knowledge": "Local emitter observations only; acknowledgements do not prove current Herdr ownership or visibility."})
-    }
     async fn control(&mut self, control: Control) -> (bool, Response) {
         let mut ok = true;
         let mut stop = false;
-        let result = match control.request.command.as_str() {
-            "ping" => json!({"version": env!("CARGO_PKG_VERSION")}),
-            "status" => self.status(control.request.include_values),
-            "refresh" => {
-                self.refresh(control.request.workspace.as_deref());
-                json!({"scheduled":true})
+        let result = match control.command {
+            Command::Ping => ControlResult::Ping {
+                version: env!("CARGO_PKG_VERSION"),
+            },
+            Command::Status { include_values } => {
+                ControlResult::Status(self.status(include_values))
             }
-            "reload" => match self.reload().await {
-                Ok(changed) => json!({"accepted":true, "changed":changed}),
+            Command::Refresh { workspace } => {
+                self.refresh(workspace.as_deref());
+                ControlResult::Scheduled { scheduled: true }
+            }
+            Command::Reload => match self.reload().await {
+                Ok(changed) => ControlResult::Reloaded {
+                    accepted: true,
+                    changed,
+                },
                 Err(e) => {
                     self.reject(&e);
                     ok = false;
-                    json!({"accepted":false,"error":e.to_string()})
+                    ControlResult::Rejected {
+                        accepted: false,
+                        error: e.to_string(),
+                    }
                 }
             },
-            "run-job" => match control.request.job.as_deref() {
+            Command::RunJob { name } => match name.as_deref() {
                 None => {
                     for job in self.background.values_mut() {
                         job.trigger();
                     }
-                    json!({"scheduled":true})
+                    ControlResult::Scheduled { scheduled: true }
                 }
                 Some(name) => match self.background.get_mut(name) {
                     Some(job) => {
                         job.trigger();
-                        json!({"scheduled":true})
+                        ControlResult::Scheduled { scheduled: true }
                     }
                     None => {
                         ok = false;
-                        json!({"error":"unknown job"})
+                        ControlResult::Error {
+                            error: "unknown job",
+                        }
                     }
                 },
             },
-            "stop" => {
+            Command::Stop => {
                 stop = true;
-                json!({"stopping":true})
-            }
-            _ => {
-                ok = false;
-                json!({"error":"unknown command"})
+                ControlResult::Stopping { stopping: true }
             }
         };
         let response = Response {
@@ -790,7 +780,7 @@ impl Coordinator {
             ok,
             ready: true,
             identity: self.identity.clone(),
-            result,
+            result: serde_json::to_value(result).expect("control result serialization"),
         };
         let _ = control.reply.send(response.clone());
         (stop, response)
@@ -910,14 +900,14 @@ pub async fn run(
             _ = term.recv() => break Ok(()),
             _ = interrupt.recv() => break Ok(()),
             Some(control) = rx.recv() => {
-                let mut previous_reload = control.request.command == "reload";
+                let mut previous_reload = control.command == Command::Reload;
                 let (mut stop, mut response) = c.control(control).await;
                 // Requests accumulated during the same reload share its result. Preserve
                 // ordering across other commands and cap each admission batch.
                 for _ in 0..32 {
                     if stop { break; }
                     let Ok(control) = rx.try_recv() else { break; };
-                    let reload = control.request.command == "reload";
+                    let reload = control.command == Command::Reload;
                     if reload && previous_reload { let _ = control.reply.send(response.clone()); }
                     else { (stop, response) = c.control(control).await; }
                     previous_reload = reload;

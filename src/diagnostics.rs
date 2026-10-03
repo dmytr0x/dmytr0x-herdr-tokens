@@ -1,6 +1,7 @@
 use crate::providers::Patch;
 use anyhow::Result;
-use serde_json::{Value, json};
+use serde::Serialize;
+use serde_json::Value;
 use std::{
     collections::BTreeMap,
     fs::{self, File, OpenOptions},
@@ -30,23 +31,47 @@ pub struct JobStatus {
 fn age(time: Option<Instant>) -> Option<u64> {
     time.map(|t| Instant::now().saturating_duration_since(t).as_millis() as u64)
 }
+#[derive(Serialize)]
+pub struct CollectorObservations<'a> {
+    last_attempt_age_ms: Option<u64>,
+    last_collection_age_ms: Option<u64>,
+    last_acknowledgement_age_ms: Option<u64>,
+    duration_ms: Option<u64>,
+    consecutive_failures: u64,
+    collection_error: &'a Option<String>,
+    publication_error: &'a Option<String>,
+    estimated_expiry_in_ms: Option<u64>,
+    missed_deadlines: u64,
+    output_truncated: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_collected: Option<&'a Option<Patch>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_acknowledged: Option<&'a Option<Patch>>,
+}
 impl JobStatus {
-    pub fn json(&self, include_values: bool, ttl_ms: u64) -> Value {
-        let mut v = json!({
-            "last_attempt_age_ms": age(self.attempted), "last_collection_age_ms": age(self.collected),
-            "last_acknowledgement_age_ms": age(self.acknowledged), "duration_ms": self.duration_ms,
-            "consecutive_failures": self.failures, "collection_error": self.error, "publication_error": self.publication_error,
-            "estimated_expiry_in_ms": age(self.acknowledged_completion).map(|a| ttl_ms.saturating_sub(a)),
-            "missed_deadlines": self.missed_deadlines, "output_truncated": self.truncated,
-        });
-        if include_values {
-            v["last_collected"] = json!(self.last_collected);
-            v["last_acknowledged"] = json!(self.last_acknowledged);
+    pub fn observations(&self, include_values: bool, ttl_ms: u64) -> CollectorObservations<'_> {
+        CollectorObservations {
+            last_attempt_age_ms: age(self.attempted),
+            last_collection_age_ms: age(self.collected),
+            last_acknowledgement_age_ms: age(self.acknowledged),
+            duration_ms: self.duration_ms,
+            consecutive_failures: self.failures,
+            collection_error: &self.error,
+            publication_error: &self.publication_error,
+            estimated_expiry_in_ms: age(self.acknowledged_completion)
+                .map(|a| ttl_ms.saturating_sub(a)),
+            missed_deadlines: self.missed_deadlines,
+            output_truncated: self.truncated,
+            last_collected: include_values.then_some(&self.last_collected),
+            last_acknowledged: include_values.then_some(&self.last_acknowledged),
         }
-        v
+    }
+    pub fn json(&self, include_values: bool, ttl_ms: u64) -> Value {
+        serde_json::to_value(self.observations(include_values, ttl_ms))
+            .expect("diagnostics serialization")
     }
 }
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
 pub struct TargetStatus {
     pub workspaces: Vec<String>,
     pub running: bool,
@@ -55,12 +80,16 @@ pub struct TargetStatus {
     pub consecutive_failures: u64,
     pub error: Option<String>,
 }
+#[derive(Serialize)]
+pub struct TargetObservations<'a> {
+    dir: &'a Path,
+    #[serde(flatten)]
+    status: &'a TargetStatus,
+}
 impl TargetStatus {
     pub fn json(&self, dir: &Path) -> Value {
-        json!({
-            "dir": dir, "workspaces": self.workspaces, "running": self.running, "last_exit": self.last_exit,
-            "duration_ms": self.duration_ms, "consecutive_failures": self.consecutive_failures, "error": self.error,
-        })
+        serde_json::to_value(TargetObservations { dir, status: self })
+            .expect("target serialization")
     }
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -78,16 +107,42 @@ pub struct BackgroundStatus {
     pub last_run: Option<LastRun>,
     pub targets: BTreeMap<PathBuf, TargetStatus>,
 }
+#[derive(Serialize)]
+pub struct RunObservations {
+    age_ms: Option<u64>,
+    duration_ms: u64,
+    targets: u64,
+    succeeded: u64,
+    failed: u64,
+    skipped: u64,
+}
+#[derive(Serialize)]
+pub struct BackgroundDiagnostics<'a> {
+    missed_deadlines: u64,
+    last_run: Option<RunObservations>,
+    targets: Vec<TargetObservations<'a>>,
+}
 impl BackgroundStatus {
+    pub fn observations(&self) -> BackgroundDiagnostics<'_> {
+        BackgroundDiagnostics {
+            missed_deadlines: self.missed_deadlines,
+            last_run: self.last_run.as_ref().map(|r| RunObservations {
+                age_ms: age(Some(r.completed)),
+                duration_ms: r.duration_ms,
+                targets: r.targets,
+                succeeded: r.succeeded,
+                failed: r.failed,
+                skipped: r.skipped,
+            }),
+            targets: self
+                .targets
+                .iter()
+                .map(|(dir, status)| TargetObservations { dir, status })
+                .collect(),
+        }
+    }
     pub fn json(&self) -> Value {
-        json!({
-            "missed_deadlines": self.missed_deadlines,
-            "last_run": self.last_run.as_ref().map(|r| json!({
-                "age_ms": age(Some(r.completed)), "duration_ms": r.duration_ms, "targets": r.targets,
-                "succeeded": r.succeeded, "failed": r.failed, "skipped": r.skipped,
-            })),
-            "targets": self.targets.iter().map(|(dir, t)| t.json(dir)).collect::<Vec<_>>(),
-        })
+        serde_json::to_value(self.observations()).expect("background serialization")
     }
 }
 struct Log {

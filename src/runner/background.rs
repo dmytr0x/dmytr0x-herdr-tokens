@@ -9,7 +9,7 @@ use crate::{
     diagnostics::{BackgroundStatus, LastRun, TargetStatus},
     providers::{self, JobOutcome},
 };
-use serde_json::{Value, json};
+use serde::Serialize;
 use std::{
     collections::{BTreeMap, VecDeque},
     path::PathBuf,
@@ -391,23 +391,34 @@ impl BackgroundJob {
         });
     }
 
-    pub fn json(&self) -> Value {
+    pub fn observations(&self) -> BackgroundObservations<'_> {
         let (phase, chunk) = match &self.run {
             None => ("idle", None),
             Some(run) if run.resolve.is_some() => ("resolving", None),
             Some(run) => ("chunk", Some([run.chunk.0, run.chunk.1])),
         };
-        let mut v = self.status.json();
-        v["name"] = json!(self.job.name);
-        v["worktrees"] = json!(self.job.worktrees);
-        v["phase"] = json!(phase);
-        v["chunk"] = json!(chunk);
-        v["run_pending"] = json!(self.run_pending);
-        v["next_due_in_ms"] = json!(
-            self.due
+        BackgroundObservations {
+            diagnostics: self.status.observations(),
+            name: &self.job.name,
+            worktrees: self.job.worktrees,
+            phase,
+            chunk,
+            run_pending: self.run_pending,
+            next_due_in_ms: self
+                .due
                 .saturating_duration_since(Instant::now())
-                .as_millis() as u64
-        );
-        v
+                .as_millis() as u64,
+        }
     }
+}
+#[derive(Serialize)]
+pub(super) struct BackgroundObservations<'a> {
+    #[serde(flatten)]
+    diagnostics: crate::diagnostics::BackgroundDiagnostics<'a>,
+    name: &'a str,
+    worktrees: Worktrees,
+    phase: &'static str,
+    chunk: Option<[usize; 2]>,
+    run_pending: bool,
+    next_due_in_ms: u64,
 }
