@@ -31,23 +31,23 @@ Git, Herdr, or configured commands; runtime preflight happens on `run`/`start`.
 
 ## Evidence and outstanding gates
 
-No complete platform/tool-version qualification record for the current changes
-is available in this checkout. The historical improvement-plan baseline reports
-formatting, Clippy and 76 tests passing at `dc377c0` on 2026-10-03, but omits exact
-OS, architecture and installed tool versions. It does not qualify the subsequent
-changes or a particular Herdr/Git version. No checks were rerun for this
-documentation update; the following gates remain pending recorded results.
+Existing CI and Release logs were reviewed on 2026-10-04; bounded, sanitized
+summaries are preserved below so the evidence survives log/artifact expiration.
+These results qualify only the recorded commits and commands. No hosted run was
+returned for checkout commit `99542fee77382592ca1bbd2b388634505f2cc627` at review
+time, and no checks were rerun for this documentation update. Complete current
+platform/tool-version qualification remains pending.
 
 | Gate | Available check | Recorded result for current changes |
 | --- | --- | --- |
 | Local docs, examples, Python and Rust checks | [Contributor checks](../CONTRIBUTING.md#checks) | Pending human-run checks |
-| Linux/macOS integration | [CI matrix](../.github/workflows/ci.yml): Ubuntu 24.04 and ARM64 `macos-15` | No run URL/result recorded |
-| Coverage | CI Linux coverage job, 90% line threshold | No measured result recorded |
+| Linux/macOS integration | [CI matrix](../.github/workflows/ci.yml): Ubuntu 24.04 and ARM64 `macos-15` | [CI pass](#ci-pass-2026-10-04) at `4c35c43`; later [PR merge failed](#ci-failure-2026-10-04) before tests; current checkout pending |
+| Coverage | CI Linux coverage job, 90% line threshold | [95.18% lines](#ci-pass-2026-10-04) at `4c35c43`; later PR merge failed compilation; current checkout pending |
 | Real Herdr 0.9.1 | Isolated acceptance harness below | Unqualified; minimum-version gate open |
 | Other Herdr versions, including 0.9.3 | Same harness with explicit version selection | No passing run recorded |
 | Git 2.36.0 | Provider and lifecycle suites with that installed binary | No binary qualification recorded; parser fixtures alone are insufficient |
 | Soak | 600-second fake-Herdr workload below | No resource/latency results recorded |
-| Release artifacts | Native packaged-binary smoke checks in release workflow | No run results recorded; cross-built artifacts still require native checks |
+| Release artifacts | Native packaged-binary smoke checks in release workflow | [v0.2.0 built and published](#release-v020-2026-10-03); archives not smoke-tested by that run; current release qualification pending |
 | Service managers | Native checks of customized examples below | Structure checks only are provided; activation not qualified |
 
 For each completed gate, record the date, tested commit (and any uncommitted
@@ -73,6 +73,112 @@ Before landing, compare that evidence for both triples with the previous release
 and record any minimum-version change alongside the run URL and smoke results.
 A newer SDK or build host does not establish compatibility with older macOS
 versions; execution on those versions remains a separate qualification gate.
+
+### CI pass: 2026-10-04
+
+[Run 37190851976](https://github.com/dmytr0x/dmytr0x-herdr-tokens/actions/runs/37190851976),
+09:02–09:04 UTC, **success**. All four checkout logs identify tested commit
+`4c35c4331fd5d1d0998625defe0d55b60a680965`. Dirty state was not recorded before
+checks; confirmation of uncommitted changes remains pending.
+
+| Job (all passed) | Actual OS / host architecture | Runner image / version | Python |
+| --- | --- | --- | --- |
+| check (ubuntu-24.04) | Ubuntu 24.04.5 / x86-64 | ubuntu-24.04 / 20260927.320.1 | 3.12.14 |
+| check (macos-15) | macOS 15.7.9 / ARM64 | macos-15-arm64 / 20260907.0337.1 | 3.12.10 |
+| coverage | Ubuntu 24.04.5 / x86-64 | ubuntu-24.04 / 20260927.320.1 | 3.12.14 |
+| musl | Ubuntu 22.04.5 / x86-64 | ubuntu-22.04 / 20260927.309.1 | Not recorded; pending |
+
+All four jobs logged `rustc 1.94.0 (4a4ef493e 2026-03-02)` and Git 2.55.0.
+Cargo's exact version was not recorded and remains pending. Herdr integration
+uses test doubles, not a real-server acceptance run; no real Herdr version is
+qualified. Git 2.55.0 execution does not qualify Git 2.36.0.
+
+Both check jobs passed these exact commands (94 Rust tests, two doctests and
+eight Python tests per platform):
+
+```sh
+for script in scripts/*.sh; do sh -n "$script" || exit; done
+python3 -m unittest discover -s tests -p 'test_*.py'
+python3 scripts/check-docs.py
+cargo fmt --check
+cargo clippy --locked --all-targets -- -D warnings
+cargo test --locked --all-targets
+cargo test --locked --doc
+cargo build --release --locked
+```
+
+Coverage used `cargo-llvm-cov 0.9.1` and passed the following command. The
+reported total was 3,506 lines, 169 missed, **95.18% line coverage** (threshold
+90%); region coverage was 93.13%, function coverage 93.80%.
+
+```sh
+set -o pipefail
+cargo llvm-cov --locked --all-targets --summary-only --fail-under-lines 90 2>&1 | tee "$RUNNER_TEMP/coverage-summary.txt"
+```
+
+The musl job passed `cargo build --release --locked --target x86_64-unknown-linux-musl`;
+it did not execute that binary. ShellCheck steps were skipped on macOS by design.
+Neither a short soak nor the 600-second qualification soak ran in these jobs.
+
+### CI failure: 2026-10-04
+
+[Run 37190948652](https://github.com/dmytr0x/dmytr0x-herdr-tokens/actions/runs/37190948652),
+09:04–09:05 UTC, **failure**. The run API reports PR head
+`0d7e417a8433b7743420c6a3205262ab0df624d7`, but all four checkout logs identify
+the actual tested merge commit `4663ce3eb98783664a3ecdeecff00ce3fd5e2699`
+(merged into `4c35c4331fd5d1d0998625defe0d55b60a680965`). Dirty state was not
+recorded before checks and remains pending. Each job logged the same OS,
+architecture, runner image, Rust, Git and Python versions as its counterpart
+in the passing run above; Cargo and musl-job Python versions remain pending.
+No real Herdr acceptance or soak ran.
+
+Both platform checks failed `cargo clippy --locked --all-targets -- -D warnings`
+with exit 101: `E0277`, the SHA-256 digest type does not implement `LowerHex`,
+at `src/config.rs:14:21` and `src/config.rs:358:25`. Shell syntax, Python tests,
+documentation and formatting passed first. Rust tests, doctests and the later
+native release builds did not run. macOS ShellCheck steps were skipped.
+
+The musl build command and coverage command recorded above also failed with
+exit 101 and the same compiler error. Coverage used `cargo-llvm-cov 0.9.1`;
+no coverage percentage was produced. This failure does not replace the earlier
+passing commit's result or establish a failure at the current checkout commit.
+
+### Release v0.2.0: 2026-10-03
+
+[Run 37128640595](https://github.com/dmytr0x/dmytr0x-herdr-tokens/actions/runs/37128640595),
+14:09–14:11 UTC, **success**, at `dc377c0b8ad625817285e79126d7e5b6bf692735`.
+Dirty state before checks/builds was not recorded and remains pending.
+The source-test and four build jobs logged Rust 1.94.0
+(`4a4ef493e 2026-03-02`) and Git 2.55.0; exact Cargo and Python versions for
+those jobs remain pending. The separate tag-validation job set up Python
+3.14.7. No real Herdr version was tested.
+
+| Job / target | Actual OS / host architecture | Runner image / version | Result |
+| --- | --- | --- | --- |
+| Test release source | Ubuntu 24.04.5 / x86-64 | ubuntu-24.04 / 20260927.320.1 | Source tests passed |
+| x86_64-unknown-linux-musl | Ubuntu 22.04.5 / x86-64 | ubuntu-22.04 / 20260927.309.1 | Built and packaged; archive not executed |
+| aarch64-unknown-linux-musl | Ubuntu 24.04.5 / ARM64 | ubuntu-24.04-arm / 20260927.135.1 | Built and packaged; archive not executed |
+| x86_64-apple-darwin | macOS 14.8.9 / ARM64 | macos-14-arm64 / 20260831.0302.1 | Cross-built and packaged; archive not executed |
+| aarch64-apple-darwin | macOS 14.8.9 / ARM64 | macos-14-arm64 / 20260831.0302.1 | Built and packaged; archive not executed |
+
+The source job passed `sh -n scripts/*.sh`, `cargo fmt --check`,
+`cargo clippy --locked --all-targets -- -D warnings`, and `cargo test --locked`
+(76 Rust tests; zero doctests). Each build passed the corresponding exact command:
+
+```sh
+cargo build --release --locked --target "x86_64-unknown-linux-musl"
+cargo build --release --locked --target "aarch64-unknown-linux-musl"
+cargo build --release --locked --target "x86_64-apple-darwin"
+cargo build --release --locked --target "aarch64-apple-darwin"
+```
+
+All four archives and `SHA256SUMS` were published to the
+[v0.2.0 release](https://github.com/dmytr0x/dmytr0x-herdr-tokens/releases/tag/v0.2.0).
+Intermediate Actions artifacts had seven-day retention; this in-repository summary
+and the release assets preserve the available evidence. That historical workflow
+had no packaged-binary smoke step. Native archive execution, real-Herdr, old-Git,
+soak and macOS deployment-minimum qualification remain open; successful packaging
+does not satisfy them or qualify the later `macos-15` Release configuration.
 
 ## Qualification commands
 
