@@ -51,8 +51,8 @@ versions and results; a configured CI job is not qualification evidence.
 Keep the versions in `Cargo.toml` and `herdr-plugin.toml` identical. After the commit passes CI, create and push the matching tag:
 
 ```sh
-git tag v0.2.0
-git push origin v0.2.0
+git tag v0.3.0
+git push origin v0.3.0
 ```
 
 The release workflow rejects a tag that is not exactly `v<manifest-version>`. It builds archives for macOS and Linux on x86-64 and ARM64, generates `SHA256SUMS`, and creates the GitHub Release. Re-running the workflow downloads existing assets and requires byte-for-byte matches. Missing or different published assets fail without replacement. Rebuilds are not assumed reproducible; use a new version for different bytes. Do not move a published version tag to different source; publish a new version instead.

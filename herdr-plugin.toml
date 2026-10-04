@@ -1,6 +1,6 @@
 id = "dmytr0x-herdr-tokens"
 name = "Tokens Emitter"
-version = "0.2.0"
+version = "0.3.0"
 min_herdr_version = "0.9.1"
 description = "Publish dynamic workspace sidebar tokens"
 platforms = ["linux", "macos"]
