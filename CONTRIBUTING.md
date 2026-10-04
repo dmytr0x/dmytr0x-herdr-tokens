@@ -58,10 +58,14 @@ write the result (or explicit non-execution) to the workflow summary. Cross-buil
 macOS artifacts still need native qualification before release. No workflow
 pushes commits or moves tags on a rerun.
 
-Actions remain version-tagged. Review upstream release notes and permissions when
-updating an action major, update CI and release workflows together, and run both
-platform checks. Immutable action revisions and automated dependency updates are
-a separate maintenance change; no unmaintained pins are introduced here.
+Remote Actions use verified full 40-character upstream commit revisions with
+readable version comments; local Actions remain paths. Pin rust-toolchain to a
+commit in upstream master history and set `with.toolchain: 1.94.0` explicitly,
+preserving each job's components and targets. Dependabot checks for action updates
+weekly; if it is disabled or absent, review upstream revisions quarterly.
+Review upstream release notes, action metadata, and permissions when updating
+pins, coordinate updates across all workflows, and run both platform checks and
+an isolated release pipeline to verify tool versions and artifact transfers.
 
 Use the real-Herdr harness without `--capture` for qualification. Captured fixture
 replacement is a separate reviewed change. Select `--expected-herdr-version`
