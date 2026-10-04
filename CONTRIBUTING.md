@@ -11,6 +11,7 @@ for script in scripts/*.sh; do sh -n "$script" || exit; done
 cargo fmt --check
 cargo clippy --locked --all-targets -- -D warnings
 cargo test --locked --all-targets
+cargo test --locked --doc
 cargo build --release --locked
 ```
 

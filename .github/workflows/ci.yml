@@ -29,7 +29,8 @@ jobs:
       - run: python3 scripts/check-docs.py
       - run: cargo fmt --check
       - run: cargo clippy --locked --all-targets -- -D warnings
-      - run: cargo test --locked
+      - run: cargo test --locked --all-targets
+      - run: cargo test --locked --doc
       - run: cargo build --release --locked
   coverage:
     runs-on: ubuntu-24.04

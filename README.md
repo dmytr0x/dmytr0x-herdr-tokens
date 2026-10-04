@@ -310,7 +310,8 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for contribution guidelines and coverage 
 ```sh
 cargo fmt --check
 cargo clippy --locked --all-targets -- -D warnings
-cargo test --locked
+cargo test --locked --all-targets
+cargo test --locked --doc
 cargo build --release --locked
 python3 tests/real_herdr.py --expected-herdr-version 0.9.1  # explicitly select the installed version
 python3 tests/soak.py --seconds 600 --output /tmp/herdr-tokens-soak.json
