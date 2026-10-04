@@ -46,6 +46,19 @@ jobs:
       - run: cargo test --locked --all-targets
       - run: cargo test --locked --doc
       - run: cargo build --release --locked
+  musl:
+    # Keep the x86-64 musl runner aligned with Release.
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@1.94.0
+        with:
+          targets: x86_64-unknown-linux-musl
+      - name: Install Linux linker
+        run: sudo apt-get update && sudo apt-get install --yes musl-tools
+      - name: Build x86-64 musl release binary
+        run: cargo build --release --locked --target x86_64-unknown-linux-musl
   coverage:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
