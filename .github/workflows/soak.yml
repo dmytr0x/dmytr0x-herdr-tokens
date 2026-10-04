@@ -1,0 +1,108 @@
+name: Soak
+on:
+  workflow_dispatch:
+    inputs:
+      seconds:
+        description: 'Soak duration in seconds (120–1200; full qualification requires 600)'
+        required: true
+        default: '120'
+        type: string
+  schedule:
+    - cron: '19 3 * * 1'
+permissions:
+  contents: read
+# Runs use isolated runners; do not cancel ongoing evidence collection.
+jobs:
+  soak:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: '3.12'
+          update-environment: true
+      - name: Validate duration
+        env:
+          REQUESTED_SECONDS: ${{ inputs.seconds }}
+        run: |
+          python3 - <<'PY'
+          import os
+          import re
+          import sys
+
+          raw = "600" if os.environ["GITHUB_EVENT_NAME"] == "schedule" else os.environ["REQUESTED_SECONDS"]
+          if not re.fullmatch(r"[0-9]{3,4}", raw):
+              sys.exit("seconds must be an integer in [120, 1200]")
+          seconds = int(raw)
+          if not 120 <= seconds <= 1200:
+              sys.exit("seconds must be an integer in [120, 1200]")
+          with open(os.environ["GITHUB_ENV"], "a") as output:
+              output.write(f"SOAK_SECONDS={seconds}\n")
+          PY
+      - uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # master; Rust 1.94.0
+        with:
+          toolchain: 1.94.0
+      - name: Record environment
+        run: |
+          {
+            echo '### Soak environment'
+            echo "Requested duration: $SOAK_SECONDS seconds"
+            echo "Tested SHA: $(git rev-parse HEAD)"
+            echo "Event: $GITHUB_EVENT_NAME"
+            echo "Run: $GITHUB_RUN_ID / attempt $GITHUB_RUN_ATTEMPT"
+            echo '```text'
+            cat /etc/os-release
+            uname -a
+            rustc --version
+            cargo --version
+            python3 --version
+            git --version
+            echo '```'
+            echo 'A 120-second success is not full 600-second qualification.'
+            echo 'RSS/latency have no enforced thresholds; inspect the report before claiming resource-regression results.'
+          } | tee "$RUNNER_TEMP/soak-environment.log" >> "$GITHUB_STEP_SUMMARY"
+      - name: Build release binary
+        run: cargo build --release --locked
+      - name: Run isolated soak
+        id: soak
+        run: |
+          set -o pipefail
+          python3 tests/soak.py --seconds "$SOAK_SECONDS" --output "$RUNNER_TEMP/soak.json" 2>&1 | tee "$RUNNER_TEMP/soak-console.log"
+      - name: Summarize available evidence
+        if: always()
+        env:
+          SOAK_OUTCOME: ${{ steps.soak.outcome }}
+        run: |
+          {
+            echo '### Soak result'
+            echo "Requested duration (validated): ${SOAK_SECONDS:-unavailable; validation did not complete}"
+            echo "Workflow SHA: $GITHUB_SHA"
+            echo "Runner OS: $RUNNER_OS / $RUNNER_ARCH (ubuntu-24.04)"
+            echo "Harness outcome: $SOAK_OUTCOME"
+            if [[ -f "$RUNNER_TEMP/soak.json" ]]; then
+              echo 'JSON report available; its presence alone does not establish success because cleanup can still fail.'
+            else
+              echo 'JSON report missing: the harness did not produce a report; no successful soak is claimed.'
+            fi
+            if [[ ! -f "$RUNNER_TEMP/soak-environment.log" ]]; then
+              echo 'Tool-version evidence unavailable: environment recording did not complete.'
+            fi
+            if [[ ! -f "$RUNNER_TEMP/soak-console.log" ]]; then
+              echo 'Console log missing: the harness did not reach console capture.'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload available soak evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: soak-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/soak.json
+            ${{ runner.temp }}/soak-console.log
+            ${{ runner.temp }}/soak-environment.log
+          retention-days: 14
+          if-no-files-found: warn
