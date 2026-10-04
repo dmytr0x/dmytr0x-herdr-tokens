@@ -1,0 +1,31 @@
+version: 2
+updates:
+  - package-ecosystem: "cargo"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    groups:
+      cargo-compatible:
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
+
+  # Root scanning covers .github/workflows and root action.yml/action.yaml.
+  # .github/actions/quality/action.yml is outside that scan; it currently has
+  # only shell steps and no remote uses references. Revisit if any are added.
+  # https://docs.github.com/en/code-security/reference/supply-chain-security/dependabot-options-reference#directories-or-directory
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    groups:
+      actions-compatible:
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
