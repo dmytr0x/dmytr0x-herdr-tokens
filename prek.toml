@@ -1,0 +1,65 @@
+# Configuration file for `prek`, a git hook framework written in Rust.
+# See https://prek.j178.dev for more information.
+#:schema https://www.schemastore.org/prek.json
+
+default_install_hook_types = ["pre-commit"]
+default_stages = ["pre-commit"]
+
+[[repos]]
+repo = "builtin"
+hooks = [
+    { id = "check-added-large-files" },
+    { id = "check-merge-conflict" },
+    { id = "check-toml" },
+    { id = "check-yaml" },
+    { id = "detect-private-key" },
+    { id = "end-of-file-fixer", args = ["--check"] },
+    { id = "trailing-whitespace", args = ["--check", "--markdown-linebreak-ext=md"] },
+]
+
+[[repos]]
+repo = "https://github.com/sirwart/ripsecrets"
+rev = "v0.1.11"
+hooks = [{ id = "ripsecrets" }]
+
+[[repos]]
+repo = "local"
+
+[[repos.hooks]]
+id = "cargo-fmt"
+name = "cargo fmt"
+language = "system"
+entry = "cargo fmt --check"
+pass_filenames = false
+files = "\\.rs$"
+
+[[repos.hooks]]
+id = "cargo-clippy"
+name = "cargo clippy"
+language = "system"
+entry = "cargo clippy --locked --all-targets -- -D warnings"
+pass_filenames = false
+files = "(\\.rs$)|(^Cargo\\.(toml|lock)$)"
+
+[[repos.hooks]]
+id = "python-tests"
+name = "python tests"
+language = "system"
+entry = "python3 -m unittest discover -s tests -p test_*.py"
+pass_filenames = false
+files = "\\.py$"
+
+[[repos.hooks]]
+id = "check-docs"
+name = "check docs"
+language = "system"
+entry = "python3 scripts/check-docs.py"
+pass_filenames = false
+files = "(\\.md$)|(^examples/)|(^scripts/check-docs\\.py$)"
+
+[[repos.hooks]]
+id = "shell-syntax"
+name = "shell syntax"
+language = "system"
+entry = "sh -n"
+files = "\\.sh$"

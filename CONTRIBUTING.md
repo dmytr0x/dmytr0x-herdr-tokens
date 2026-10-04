@@ -25,6 +25,10 @@ cargo llvm-cov --locked --all-targets --summary-only --fail-under-lines 90
 
 The coverage run includes unit, integration, and executable lifecycle tests. Keep `LLVM_PROFILE_FILE` forwarding in the lifecycle harness: otherwise child-process execution disappears from the report. Do not extend the production collector environment for instrumentation.
 
+## Git hooks
+
+[prek](https://prek.j178.dev/) runs the checks in [prek.toml](prek.toml) on `git commit` after `prek install`. The first `ripsecrets` run may compile that hook. These hooks do not replace the contributor checks above.
+
 ## Changes
 
 - Keep changes focused and add regression tests for changed behavior.
