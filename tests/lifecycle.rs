@@ -70,9 +70,13 @@ impl Harness {
         c
     }
     fn spawn(&mut self) {
+        self.spawn_with_path(std::env::var_os("PATH").unwrap());
+    }
+    fn spawn_with_path(&mut self, path: std::ffi::OsString) {
         let log = fs::File::create(self.root.join("runner.log")).unwrap();
         *self.runner.get_mut() = Some(
             self.cmd("run")
+                .env("PATH", path)
                 .stdout(Stdio::null())
                 .stderr(log)
                 .spawn()
@@ -972,4 +976,99 @@ fn startup_failure_is_reported_without_waiting_for_the_deadline() {
     let mut h = Harness::new();
     h.atomic("config/tokens.toml", "schema_version=99");
     h.spawn();
+}
+
+#[test]
+fn git_resolution_failures_are_observable_and_never_non_repository_skips() {
+    use std::os::unix::fs::PermissionsExt;
+    for (body, expected) in [
+        (None, "process launch/io failure"),
+        (Some("printf malformed"), "malformed Git response"),
+        (
+            Some("echo RAW_GIT_SECRET >&2; exit 1"),
+            "Git invocation failed",
+        ),
+        (Some("/bin/sleep 30"), "process deadline exceeded"),
+        (
+            Some(
+                "case \"$*\" in *--show-toplevel*|*--git-common-dir*) printf '%s\\n' \"$PWD\" ;; *) printf 'worktree /definitely-unavailable-herdr-test-path\\0bare\\0\\0' ;; esac",
+            ),
+            "repository path unavailable",
+        ),
+    ] {
+        let mut h = Harness::new();
+        h.settings(json!({"workspaces":{"w1":h.root.join("w1")}}));
+        h.atomic("config/tokens.toml", "schema_version=1\n[runtime]\ndiscovery_interval_ms=1000\n[[jobs]]\nname='resolve'\ncommand=['/bin/true']\ninterval_ms=86400000\n");
+        let bin = h.root.join("bin");
+        fs::create_dir(&bin).unwrap();
+        let python = herdr_tokens::process::resolve(
+            std::ffi::OsStr::new("python3"),
+            &h.root,
+            &herdr_tokens::process::environment(),
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(python, bin.join("python3")).unwrap();
+        let git = bin.join("git");
+        fs::write(&git, "#!/bin/sh\necho 'git version 2.36.0'\n").unwrap();
+        fs::set_permissions(&git, fs::Permissions::from_mode(0o755)).unwrap();
+        h.spawn_with_path(bin.into_os_string());
+        h.wait(|h| {
+            h.status(false)
+                .is_some_and(|s| s["workspaces"]["w1"].is_object())
+        });
+        match body {
+            Some(body) => fs::write(&git, format!("#!/bin/sh\n{body}\n")).unwrap(),
+            None => fs::remove_file(&git).unwrap(),
+        }
+        assert!(h.cmd("run-job").output().unwrap().status.success());
+        h.wait(|h| h.background("resolve")["last_run"]["failed"] == 1);
+        let status = h.background("resolve");
+        assert_eq!(status["last_run"]["skipped"], 0, "{status}");
+        assert_eq!(status["targets"][0]["error"], expected);
+        assert!(!status.to_string().contains("RAW_GIT_SECRET"));
+        assert!(
+            !fs::read_to_string(h.root.join("runner.log"))
+                .unwrap()
+                .contains("RAW_GIT_SECRET")
+        );
+        if expected == "process deadline exceeded" {
+            let marker = h.root.join("resolving.pid");
+            fs::write(
+                &git,
+                format!(
+                    "#!/bin/sh\necho $$ > '{}'; /bin/sleep 30\n",
+                    marker.display()
+                ),
+            )
+            .unwrap();
+            assert!(h.cmd("run-job").output().unwrap().status.success());
+            h.wait(|_| marker.exists());
+            let start = Instant::now();
+            h.stop();
+            assert!(start.elapsed() < Duration::from_secs(6));
+            assert!(!alive(&marker));
+        } else {
+            h.stop();
+        }
+    }
+}
+
+#[test]
+fn stop_cancels_discovery_and_reports_before_releasing_endpoint() {
+    for (delay, marker) in [
+        ("discovery_delay", "discovery.pid"),
+        ("report_delay", "report.pid"),
+    ] {
+        let mut h = Harness::new();
+        let mut settings = json!({"workspaces":{"w1":h.root.join("w1")}});
+        settings[delay] = json!(30);
+        h.settings(settings);
+        h.spawn();
+        h.wait(|h| h.root.join(marker).exists());
+        let start = Instant::now();
+        h.stop();
+        assert!(start.elapsed() < Duration::from_secs(6));
+        assert!(!alive(&h.root.join(marker)));
+        assert!(h.status(false).is_none());
+    }
 }

@@ -1,0 +1,15 @@
+# Copy to ~/.config/systemd/user/herdr-tokens.service after replacing every path.
+# Verify with: systemd-analyze --user verify <customized-file>
+[Unit]
+Description=Herdr workspace tokens
+
+[Service]
+Type=simple
+ExecStart=/absolute/path/herdr-tokens run --socket /absolute/path/herdr.sock --config-dir /absolute/path/config --state-dir /absolute/path/state --herdr-bin /absolute/path/herdr
+Restart=on-failure
+RestartSec=2
+KillMode=mixed
+TimeoutStopSec=7
+
+[Install]
+WantedBy=default.target

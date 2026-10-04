@@ -16,6 +16,7 @@ parser = argparse.ArgumentParser()
 parser.add_argument('--herdr', default=shutil.which('herdr'))
 parser.add_argument('--binary', default='target/release/herdr-tokens')
 parser.add_argument('--capture', action='store_true')
+parser.add_argument('--expected-herdr-version', default='0.9.1')
 args = parser.parse_args()
 ROOT = Path(__file__).resolve().parent.parent
 binary = (ROOT / args.binary).resolve()
@@ -96,7 +97,7 @@ ttl_ms=1500
     server = subprocess.Popen([args.herdr, 'server'], env=env, stdout=log, stderr=log, start_new_session=True)
     try:
         wait(lambda: (root / 'api.sock').exists())
-        assert '0.9.1' in herdr('--version').stdout.decode(), 'Review contract before qualifying another version'
+        assert herdr('--version').stdout.decode().strip() == f'herdr {args.expected_herdr_version}', 'Unexpected Herdr version; explicitly select the version being qualified'
         workspace_ids = []
         for number in (1, 2):
             created = json.loads(herdr('workspace', 'create', '--cwd', str(root / f'repo{number}'), '--no-focus').stdout)
@@ -188,7 +189,7 @@ ttl_ms=1500
         herdr('plugin', 'action', 'invoke', 'dmytr0x-herdr-tokens.status')
         herdr('plugin', 'action', 'invoke', 'dmytr0x-herdr-tokens.stop')
         wait(lambda: action_status().returncode != 0)
-        print('PASS: isolated Herdr 0.9.1 contract, manifest actions and two-workspace acceptance checks')
+        print(f'PASS: isolated Herdr {args.expected_herdr_version} contract, manifest actions and two-workspace acceptance checks')
     finally:
         cleanup_all(
             lambda: subprocess.run([str(binary), 'stop', '--socket', str(root / 'api.sock')], env=env, capture_output=True, timeout=6),

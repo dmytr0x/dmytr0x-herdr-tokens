@@ -1,10 +1,13 @@
 # Contributing
 
-Use macOS or Linux with the Rust toolchain pinned in `rust-toolchain.toml`, Git, and Python 3. Herdr is only required for the optional real-server acceptance harness.
+Use macOS or Linux with the Rust toolchain pinned in `rust-toolchain.toml`, Git ≥2.36, and Python ≥3.11. Herdr is only required for the optional real-server acceptance harness.
 
 ## Checks
 
 ```sh
+python3 -m unittest discover -s tests -p 'test_*.py'
+python3 scripts/check-docs.py
+for script in scripts/*.sh; do sh -n "$script" || exit; done
 cargo fmt --check
 cargo clippy --locked --all-targets -- -D warnings
 cargo test --locked --all-targets
@@ -34,13 +37,9 @@ Before opening a pull request, include the motivation, relevant tests, and any c
 
 See [compatibility and qualification](docs/compatibility.md) for acceptance commands and the remaining release gates. Passing coverage is not proof of cross-platform compatibility or crash safety.
 
-## First GitHub publication
-
-- Confirm the existing MIT license and copyright attribution are appropriate.
-- Choose the repository owner/name and add its actual URL as `package.repository` in `Cargo.toml`.
-- Initialize Git, inspect the complete staged file list, and create the remote only after reviewing the files to be published.
-- Enable GitHub private vulnerability reporting and branch protection requiring the CI checks.
-- Run the Linux/macOS CI matrix before tagging a release; keep unresolved qualification limits visible.
+That document also lists a verification method for every shipped example and the
+evidence required to close a qualification gate. Record actual platform/tool
+versions and results; a configured CI job is not qualification evidence.
 
 ## Releases
 
@@ -51,4 +50,19 @@ git tag v0.2.0
 git push origin v0.2.0
 ```
 
-The release workflow rejects a tag that is not exactly `v<manifest-version>`. It builds archives for macOS and Linux on x86-64 and ARM64, generates `SHA256SUMS`, and creates the GitHub Release. Re-running the workflow replaces assets on an existing release. Do not move a published version tag to different source; publish a new version instead.
+The release workflow rejects a tag that is not exactly `v<manifest-version>`. It builds archives for macOS and Linux on x86-64 and ARM64, generates `SHA256SUMS`, and creates the GitHub Release. Re-running the workflow downloads existing assets and requires byte-for-byte matches. Missing or different published assets fail without replacement. Rebuilds are not assumed reproducible; use a new version for different bytes. Do not move a published version tag to different source; publish a new version instead.
+
+Release builds smoke-test packaged executables on matching host architectures and
+write the result (or explicit non-execution) to the workflow summary. Cross-built
+macOS artifacts still need native qualification before release. No workflow
+pushes commits or moves tags on a rerun.
+
+Actions remain version-tagged. Review upstream release notes and permissions when
+updating an action major, update CI and release workflows together, and run both
+platform checks. Immutable action revisions and automated dependency updates are
+a separate maintenance change; no unmaintained pins are introduced here.
+
+Use the real-Herdr harness without `--capture` for qualification. Captured fixture
+replacement is a separate reviewed change. Select `--expected-herdr-version`
+explicitly when qualifying a version other than 0.9.1, and record the actual result
+in the compatibility document. Never point the harness at an active user endpoint.

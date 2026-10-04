@@ -46,3 +46,18 @@ async fn unobserved_times_remain_unknown() {
     }
     assert_eq!(status["consecutive_failures"], 0);
 }
+
+#[test]
+fn non_utf8_paths_remain_serializable_display_context() {
+    use std::{ffi::OsString, os::unix::ffi::OsStringExt, path::PathBuf};
+    let path = PathBuf::from(OsString::from_vec(b"/repo/bad\xffname".to_vec()));
+    let directory = herdr_tokens::herdr::Directory {
+        reported: Some(path.clone()),
+        canonical: Some(path.clone()),
+        reason: "fixture".into(),
+    };
+    let value = serde_json::to_value(directory).unwrap();
+    assert_eq!(value["canonical"], "/repo/bad�name");
+    let target = herdr_tokens::diagnostics::TargetStatus::default().json(&path);
+    assert_eq!(target["dir"], "/repo/bad�name");
+}

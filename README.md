@@ -1,10 +1,10 @@
 # Herdr Tokens Emitter
 
-One Rust executable that collects **display-only** workspace metadata and reports it to Herdr. Herdr owns sidebar rendering, storage and TTL expiry. macOS and Linux; Herdr **0.9.1** is the verified contract. Later versions require contract testing.
+One Rust executable that collects **display-only** workspace metadata and reports it to Herdr. Herdr owns sidebar rendering, storage and TTL expiry. macOS and Linux; Herdr **0.9.1** is the minimum accepted version. See [qualification evidence](docs/compatibility.md) for versions actually tested.
 
 ## Install from GitHub
 
-Prerequisites: Herdr ≥0.9.1, Git, `curl`, and `tar`. Cargo is **not** required.
+Prerequisites: Herdr ≥0.9.1, Git ≥2.36, `curl`, and `tar`. Cargo is **not** required.
 
 1. Let Herdr install the plugin. Review its preview, then confirm:
 
@@ -20,20 +20,19 @@ Prerequisites: Herdr ≥0.9.1, Git, `curl`, and `tar`. Cargo is **not** required
    herdr plugin action invoke dmytr0x-herdr-tokens.start
    ```
 
-   On first start, the plugin creates `tokens.toml` from the included example without overwriting an existing configuration.
+   On first start, the plugin creates `tokens.toml` from the included example without overwriting an existing or concurrently created configuration. A dangling `tokens.toml` symlink is rejected; repair its target before starting.
 
 ## Build from source
 
-Prerequisites: Cargo/rustup (the checkout pins Rust 1.94.0), Herdr ≥0.9.1 and Git ≥2.20. From a repository checkout, run:
+Prerequisites: Cargo/rustup (the checkout pins Rust 1.94.0), Herdr ≥0.9.1 and Git ≥2.36. From a repository checkout, run:
 
 ```sh
 cargo build --release --locked
 herdr plugin link "$PWD"
 CONFIG_DIR="$(herdr plugin config-dir dmytr0x-herdr-tokens)"
-# Do not overwrite an existing configuration:
-test -e "$CONFIG_DIR/tokens.toml" || cp examples/tokens.toml "$CONFIG_DIR/tokens.toml"
-./target/release/herdr-tokens validate --config-dir "$CONFIG_DIR"
+# The start action atomically creates a default config only when absent:
 herdr plugin action invoke dmytr0x-herdr-tokens.start
+./target/release/herdr-tokens validate --config-dir "$CONFIG_DIR"
 ```
 
 ## Configure the sidebar
@@ -87,7 +86,7 @@ herdr-tokens run-job [--job NAME]
 | `--herdr-bin PATH` | `HERDR_BIN_PATH`, then `herdr` resolved on `PATH` |
 | `--runtime-dir PATH` | `/tmp/herdr-tokens-<uid>` |
 
-Options work before or after the subcommand. Relative explicit paths resolve against the invocation directory. `validate` needs only config; control commands need only endpoint/runtime identity. `run`/`start` additionally need config and durable state. For example:
+Options work before or after the subcommand. Relative explicit paths resolve against the invocation directory. `validate` checks syntax, schema, and semantic constraints only; it does not run Git/Herdr or execute commands. It needs only config; control commands need only endpoint/runtime identity. `run`/`start` additionally need config and durable state. For example:
 
 ```sh
 ./target/release/herdr-tokens run \
@@ -104,7 +103,7 @@ Exit codes: **0** success, **1** runtime/control failure, **2** invalid argument
 
 ## Configuration
 
-`tokens.toml` is required and may be a symlink to a regular file, which is resolved before reading. Direct regular `tokens.d/*.toml` fragments are appended in filename-byte order; fragments may only contain collectors and may not be symlinks. There are no overrides, includes or repository-local configuration discovery. Maximum: 64 files / 1 MiB total.
+`tokens.toml` is required and may be a symlink to a regular file, which is resolved before reading. Direct regular `tokens.d/*.toml` fragments are appended in filename-byte order; fragments may only contain collectors and jobs and may not be symlinks. There are no overrides, includes or repository-local configuration discovery. Maximum: 64 files / 1 MiB total.
 
 ```toml
 schema_version = 1
@@ -236,7 +235,7 @@ Inherited environment defaults: `PATH`, `HOME`, `USER`, `LOGNAME`, `TMPDIR`, `TM
 
 ### Reloads, freshness and ownership
 
-Content is polled each second and a changed snapshot confirmed after 200 ms. Invalid candidates preserve the complete active configuration. Valid changes cancel old work, advance generations and clear tokens of removed/changed collectors before replacement publication. Identical normalized configurations do not restart jobs. Multi-file edits are not atomic: use one file for inseparable changes and write through atomic replacement. Removing the required main file is invalid, not a disable operation.
+Content is polled each second and a changed snapshot confirmed after 200 ms. Invalid candidates preserve the complete active configuration. Valid collector/runtime changes cancel old work, advance generations and clear tokens of removed/changed collectors before replacement publication. Identical normalized configurations do not restart jobs. Multi-file edits are not atomic: use one file for inseparable changes and write through atomic replacement. Removing the required main file is invalid, not a disable operation.
 
 Successful collections refresh TTL even when values are unchanged. Failures do not publish fake error values or refresh old TTLs. Queued results older than their collector interval are discarded; TTL is reduced by queue age. Under overload/outage, values can expire despite the 3× interval minimum. Missed deadlines are observable, never hidden by extending TTL.
 
@@ -302,7 +301,7 @@ Herdr's existing state root may be 0755, but must not be group/world writable; m
 
 Detached logs retain at most seven daily files with a 10 MiB/day cap and suppression marker. Foreground logs go to stderr. Repeated failures are rate-limited. On stop/SIGINT/SIGTERM, child groups are cancelled/reaped and clears attempted within a five-second shutdown budget. Crashes and unavailable endpoints rely on finite TTL. Escaped malicious process groups are outside the cleanup threat model.
 
-For service-manager supervision, see `examples/systemd.service` and `examples/launchd.plist`. Customize explicit paths; nothing installs these automatically. Use `run`, not `start`.
+For service-manager supervision, see [systemd](examples/systemd.service) and [launchd](examples/launchd.plist). Customize explicit paths; nothing installs these automatically. Use `run`, not `start`.
 
 ## Development and qualification
 
@@ -313,8 +312,10 @@ cargo fmt --check
 cargo clippy --locked --all-targets -- -D warnings
 cargo test --locked
 cargo build --release --locked
-python3 tests/real_herdr.py --capture   # optional; isolated server/config/home/repos
+python3 tests/real_herdr.py --expected-herdr-version 0.9.1  # explicitly select the installed version
 python3 tests/soak.py --seconds 600 --output /tmp/herdr-tokens-soak.json
 ```
 
-Python 3 is a **test-only** prerequisite for the fake CLI/lifecycle and acceptance harnesses. Tests never target your active session. CI runs formatting, Clippy and tests on Linux and macOS. See [compatibility and release qualification](docs/compatibility.md) for observed results and remaining gates. Automatic consumption of release binaries during plugin installation, Windows, SSH collection, HTTP/file providers, watchers and dynamic provider registries are deferred. Run a separate emitter on a remote host against that host's local endpoint.
+Python ≥3.11 is a **development/test-only** prerequisite. Tests never target your active session. CI runs formatting, Clippy and tests on Linux and macOS. See [compatibility and release qualification](docs/compatibility.md) for recorded evidence, remaining gates, and shipped-example verification methods. Windows, SSH collection, HTTP/file providers, watchers and dynamic provider registries are deferred. Run a separate emitter on a remote host against that host's local endpoint.
+
+Implementation ownership and control-protocol details are recorded in [runtime invariants](docs/architecture.md).

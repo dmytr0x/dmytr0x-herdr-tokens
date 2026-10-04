@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Replace every absolute path before installing in ~/Library/LaunchAgents.
+     Verify with: plutil -lint <customized-file>. No shell expansion is performed. -->
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>local.herdr-tokens</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/absolute/path/herdr-tokens</string><string>run</string>
+    <string>--socket</string><string>/absolute/path/herdr.sock</string>
+    <string>--config-dir</string><string>/absolute/path/config</string>
+    <string>--state-dir</string><string>/absolute/path/state</string>
+    <string>--herdr-bin</string><string>/absolute/path/herdr</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict><key>PATH</key><string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string></dict>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>
+  <key>ExitTimeOut</key><integer>7</integer>
+  <key>StandardOutPath</key><string>/absolute/path/logs/herdr-tokens.out.log</string>
+  <key>StandardErrorPath</key><string>/absolute/path/logs/herdr-tokens.err.log</string>
+</dict>
+</plist>

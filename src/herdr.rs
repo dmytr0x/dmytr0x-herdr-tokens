@@ -67,9 +67,20 @@ struct Pane {
 }
 #[derive(Clone, Debug, Serialize)]
 pub struct Directory {
+    #[serde(serialize_with = "display_path")]
     pub reported: Option<PathBuf>,
+    #[serde(serialize_with = "display_path")]
     pub canonical: Option<PathBuf>,
     pub reason: String,
+}
+// JSON paths are display context. Execution keeps the original Unix bytes.
+fn display_path<S: serde::Serializer>(
+    path: &Option<PathBuf>,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    path.as_ref()
+        .map(|p| p.to_string_lossy())
+        .serialize(serializer)
 }
 pub type Discovery = BTreeMap<String, Directory>;
 impl Herdr {

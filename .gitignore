@@ -4,3 +4,5 @@ __pycache__/
 *.profraw
 *.profdata
 .DS_Store
+
+.data/

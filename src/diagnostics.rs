@@ -82,14 +82,17 @@ pub struct TargetStatus {
 }
 #[derive(Serialize)]
 pub struct TargetObservations<'a> {
-    dir: &'a Path,
+    dir: std::borrow::Cow<'a, str>,
     #[serde(flatten)]
     status: &'a TargetStatus,
 }
 impl TargetStatus {
     pub fn json(&self, dir: &Path) -> Value {
-        serde_json::to_value(TargetObservations { dir, status: self })
-            .expect("target serialization")
+        serde_json::to_value(TargetObservations {
+            dir: dir.to_string_lossy(),
+            status: self,
+        })
+        .expect("target serialization")
     }
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -137,7 +140,10 @@ impl BackgroundStatus {
             targets: self
                 .targets
                 .iter()
-                .map(|(dir, status)| TargetObservations { dir, status })
+                .map(|(dir, status)| TargetObservations {
+                    dir: dir.to_string_lossy(),
+                    status,
+                })
                 .collect(),
         }
     }

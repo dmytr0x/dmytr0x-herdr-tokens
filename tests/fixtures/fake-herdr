@@ -13,6 +13,8 @@ if settings.get('offline'):
     print(json.dumps({'id': 'fixture', 'error': {'code': 'server_not_running', 'message': 'fixture transport unavailable'}}), file=sys.stderr)
     sys.exit(1)
 if args == ['workspace', 'list']:
+    (root / 'discovery.pid').write_text(str(os.getpid()))
+    time.sleep(settings.get('discovery_delay', 0))
     if settings.get('bad_discovery'):
         print('{}')
     else:
@@ -24,6 +26,7 @@ elif args == ['pane', 'list']:
         {'workspace_id': w, 'cwd': path} for w, path in settings['workspaces'].items()
     ]}}))
 elif args[:2] == ['workspace', 'report-metadata']:
+    (root / 'report.pid').write_text(str(os.getpid()))
     time.sleep(settings.get('report_delay', 0))
     with (root / 'reports.jsonl').open('a') as log:
         log.write(json.dumps({'args': args, 'time': time.time()}) + '\n')
