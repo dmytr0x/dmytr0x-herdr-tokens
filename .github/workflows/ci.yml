@@ -23,7 +23,9 @@ jobs:
           components: rustfmt, clippy
       - uses: actions/setup-python@v7
         with:
-          python-version: '3.x'
+          python-version: '3.12'
+          update-environment: true
+      - run: python3 --version
       - uses: Swatinem/rust-cache@v2
       - run: for script in scripts/*.sh; do sh -n "$script" || exit; done
       - run: python3 -m unittest discover -s tests -p 'test_*.py'
@@ -43,7 +45,9 @@ jobs:
           components: llvm-tools-preview
       - uses: actions/setup-python@v7
         with:
-          python-version: '3.x'
+          python-version: '3.12'
+          update-environment: true
+      - run: python3 --version
       - uses: Swatinem/rust-cache@v2
       - run: cargo install cargo-llvm-cov --version 0.9.1 --locked
       - run: cargo llvm-cov --locked --all-targets --summary-only --fail-under-lines 90
