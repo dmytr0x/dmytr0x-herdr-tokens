@@ -13,11 +13,22 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04, macos-latest]
+        # Keep the supported ARM64 macOS generation aligned with Release.
+        os: [ubuntu-24.04, macos-15]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
+      - name: Record macOS runner evidence
+        if: runner.os == 'macOS'
+        run: |
+          {
+            echo '### macOS runner'
+            sw_vers
+            uname -m
+            echo "ImageOS: $ImageOS"
+            echo "ImageVersion: $ImageVersion"
+          } >> "$GITHUB_STEP_SUMMARY"
       - uses: dtolnay/rust-toolchain@1.94.0
         with:
           components: rustfmt, clippy

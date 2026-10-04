@@ -41,7 +41,7 @@ documentation update; the following gates remain pending recorded results.
 | Gate | Available check | Recorded result for current changes |
 | --- | --- | --- |
 | Local docs, examples, Python and Rust checks | [Contributor checks](../CONTRIBUTING.md#checks) | Pending human-run checks |
-| Linux/macOS integration | [CI matrix](../.github/workflows/ci.yml): Ubuntu 24.04 and `macos-latest` | No run URL/result recorded |
+| Linux/macOS integration | [CI matrix](../.github/workflows/ci.yml): Ubuntu 24.04 and ARM64 `macos-15` | No run URL/result recorded |
 | Coverage | CI Linux coverage job, 90% line threshold | No measured result recorded |
 | Real Herdr 0.9.1 | Isolated acceptance harness below | Unqualified; minimum-version gate open |
 | Other Herdr versions, including 0.9.3 | Same harness with explicit version selection | No passing run recorded |
@@ -56,6 +56,23 @@ changes), OS version, architecture, `rustc --version`, `cargo --version`,
 Include the exact command, pass/fail result, and a CI run or sanitized artifact
 reference. Record failures and skipped checks as such. A workflow definition or
 installed tool version is not a passing result.
+
+CI and both macOS Release entries use `macos-15` (ARM64). This selection was
+reviewed on 2026-10-04 against GitHub's
+[supported runner list](https://docs.github.com/en/actions/reference/runners/github-hosted-runners)
+and [macOS 14 retirement notice](https://github.blog/changelog/2026-10-01-github-actions-macos-14-runner-image-retirement/).
+Versioned labels still receive software updates. Both workflows record the actual
+OS version, architecture, and runner image version in their job summaries.
+Release retains native `aarch64-apple-darwin` packaging smoke checks;
+`x86_64-apple-darwin` is cross-built and is not executed on the ARM64 runner.
+
+Deployment-minimum impact remains unverified pending hosted Release results.
+This change sets no deployment-target override. Release records the selected SDK,
+deployment-target environment setting, and binary Mach-O minimum OS/SDK metadata.
+Before landing, compare that evidence for both triples with the previous release
+and record any minimum-version change alongside the run URL and smoke results.
+A newer SDK or build host does not establish compatibility with older macOS
+versions; execution on those versions remains a separate qualification gate.
 
 ## Qualification commands
 

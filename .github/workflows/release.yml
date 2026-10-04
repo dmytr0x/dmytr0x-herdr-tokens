@@ -82,13 +82,25 @@ jobs:
             target: x86_64-unknown-linux-musl
           - os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-musl
-          - os: macos-14
+          # Keep both builds on the same supported ARM64 macOS generation as CI.
+          - os: macos-15
             target: aarch64-apple-darwin
-          - os: macos-14
+          - os: macos-15
+            # Cross-built only; the packaging smoke step skips execution on ARM64.
             target: x86_64-apple-darwin
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
+      - name: Record macOS runner evidence
+        if: runner.os == 'macOS'
+        run: |
+          {
+            echo '### macOS runner'
+            sw_vers
+            uname -m
+            echo "ImageOS: $ImageOS"
+            echo "ImageVersion: $ImageVersion"
+          } >> "$GITHUB_STEP_SUMMARY"
       - uses: dtolnay/rust-toolchain@1.94.0
         with:
           targets: ${{ matrix.target }}
@@ -100,6 +112,22 @@ jobs:
         run: sudo apt-get update && sudo apt-get install --yes musl-tools
       - name: Build release binary
         run: cargo build --release --locked --target "${{ matrix.target }}"
+      - name: Record macOS deployment evidence
+        if: runner.os == 'macOS'
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          {
+            echo "### $TARGET deployment metadata"
+            echo "MACOSX_DEPLOYMENT_TARGET: ${MACOSX_DEPLOYMENT_TARGET:-unset (toolchain default)}"
+            echo "Selected SDK: $(xcrun --show-sdk-version)"
+            echo '```text'
+            otool -l "target/$TARGET/release/herdr-tokens" | awk '
+              /cmd LC_BUILD_VERSION|cmd LC_VERSION_MIN_MACOSX/ { remaining = 6 }
+              remaining > 0 { print; remaining-- }
+            '
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
       - name: Package release binary
         env:
           RELEASE_TAG: ${{ github.ref_name }}
