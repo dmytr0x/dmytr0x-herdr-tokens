@@ -37,6 +37,55 @@ jobs:
           python-version: '3.12'
           update-environment: true
       - run: python3 --version
+      - name: Check installed Git prerequisite
+        shell: python
+        run: |
+          import re
+          import subprocess
+          import sys
+
+          minimum = (2, 36)
+
+          def parse_version(output):
+              match = re.fullmatch(
+                  r"git version ([0-9]+)\.([0-9]+)(?:\.[0-9]+)?(?:[ .+-][^\r\n]+)?",
+                  output.strip(),
+              )
+              return tuple(map(int, match.groups())) if match else None
+
+          for output, expected in (
+              ("git version 2.35.9", False),
+              ("git version 2.36.0", True),
+              ("git version 2.100.0", True),
+              ("git version 3.0.0", True),
+              ("git version 2.39.5 (Apple Git-154)", True),
+              ("git version 2.36", True),
+              ("malformed output", False),
+              ("git version 2", False),
+              ("git version 2.36garbage", False),
+          ):
+              version = parse_version(output)
+              if (version is not None and version >= minimum) != expected:
+                  sys.exit(f"Git version parser fixture failed: {output!r}")
+
+          try:
+              result = subprocess.run(
+                  ["git", "--version"], check=True, capture_output=True, text=True,
+              )
+          except OSError as error:
+              sys.exit(f"Git >=2.36 is required; cannot execute git: {error}")
+          except subprocess.CalledProcessError as error:
+              sys.exit(
+                  f"git --version failed (exit {error.returncode}): "
+                  f"{error.stdout}{error.stderr}"
+              )
+
+          print(result.stdout, end="" if result.stdout.endswith("\n") else "\n", flush=True)
+          version = parse_version(result.stdout)
+          if version is None:
+              sys.exit(f"Cannot parse git --version output: {result.stdout!r}")
+          if version < minimum:
+              sys.exit("Git >=2.36 is required; the installed Git is too old.")
       - uses: Swatinem/rust-cache@v2
       - run: for script in scripts/*.sh; do sh -n "$script" || exit; done
       - run: python3 -m unittest discover -s tests -p 'test_*.py'
