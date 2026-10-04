@@ -87,7 +87,6 @@ jobs:
           if version < minimum:
               sys.exit("Git >=2.36 is required; the installed Git is too old.")
       - uses: Swatinem/rust-cache@v2
-      - run: for script in scripts/*.sh; do sh -n "$script" || exit; done
       - name: Install ShellCheck
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install --yes shellcheck
@@ -97,12 +96,7 @@ jobs:
       - name: Lint POSIX shell scripts
         if: runner.os == 'Linux'
         run: shellcheck --shell=sh scripts/*.sh
-      - run: python3 -m unittest discover -s tests -p 'test_*.py'
-      - run: python3 scripts/check-docs.py
-      - run: cargo fmt --check
-      - run: cargo clippy --locked --all-targets -- -D warnings
-      - run: cargo test --locked --all-targets
-      - run: cargo test --locked --doc
+      - uses: ./.github/actions/quality
       - run: cargo build --release --locked
   musl:
     # Keep the x86-64 musl runner aligned with Release.
