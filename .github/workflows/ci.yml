@@ -79,4 +79,22 @@ jobs:
           checksum: true
           fallback: none
       - run: cargo llvm-cov --version
-      - run: cargo llvm-cov --locked --all-targets --summary-only --fail-under-lines 90
+      - name: Check coverage
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo llvm-cov --locked --all-targets --summary-only --fail-under-lines 90 2>&1 | tee "$RUNNER_TEMP/coverage-summary.txt"
+      - name: Publish coverage summary
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          {
+            printf '## Coverage summary\n\n'
+            if [[ -f "$RUNNER_TEMP/coverage-summary.txt" ]]; then
+              printf '```text\n'
+              cat "$RUNNER_TEMP/coverage-summary.txt"
+              printf '\n```\n'
+            else
+              printf 'No coverage report was produced.\n'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
