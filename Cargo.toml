@@ -20,7 +20,7 @@ path = "src/main.rs"
 anyhow = "1"
 clap = { version = "4", features = ["derive", "env"] }
 fs2 = "0.4"
-nix = { version = "0.30", features = ["signal", "process", "user", "fs"] }
+nix = { version = "0.31", features = ["signal", "process", "user", "fs"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
